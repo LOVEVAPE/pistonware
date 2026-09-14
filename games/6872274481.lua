@@ -554,25 +554,49 @@ Two separate problems lived in the one line this replaces:
 
 The first non-empty entry is the one to show: KitController:getPrimaryActiveKit is exactly
 getActiveKits()[1]. ]]
-local function getKitRenderImage(plr)
-	if not plr then return '' end
+--[[ Your own input, for the AFK checks on TriggerBot, ProjectileAura and AutoZeno: they
+stand down once nothing has been pressed, clicked or moved for AFK_SECONDS. Mouse movement
+only counts when the mouse actually moved -- InputChanged also fires with a zero delta. ]]
+local AFK_SECONDS = 30
+store.lastInput = tick()
+local function markInput(input)
+	if input.UserInputType ~= Enum.UserInputType.MouseMovement or input.Delta.Magnitude > 0 then
+		store.lastInput = tick()
+	end
+end
+vape:Clean(inputService.InputBegan:Connect(markInput))
+vape:Clean(inputService.InputChanged:Connect(markInput))
+
+local function isLocalAfk()
+	return (tick() - store.lastInput) >= AFK_SECONDS
+end
+
+-- The player's primary kit: the first entry of PlayingAsKits, falling back to the older
+-- singular attribute. Shared by everything that asks "what kit is this player on".
+local function getPrimaryKit(plr)
+	if not plr then return nil end
 
 	local kit = plr:GetAttribute('PlayingAsKits')
 	if type(kit) == 'string' and kit ~= '' then
-		local primary
 		for _, name in string.split(kit, ',') do
 			if name ~= '' then
-				primary = name
-				break
+				return name
 			end
 		end
-		kit = primary
-	else
-		kit = nil
 	end
 
-	kit = kit or plr:GetAttribute('PlayingAsKit')
-	if not kit or kit == '' or kit == 'none' then return '' end
+	kit = plr:GetAttribute('PlayingAsKit')
+	if type(kit) == 'string' and kit ~= '' then
+		return kit
+	end
+	return nil
+end
+
+local function getKitRenderImage(plr)
+	if not plr then return '' end
+
+	local kit = getPrimaryKit(plr)
+	if not kit or kit == 'none' then return '' end
 
 	local meta = bedwars.BedwarsKitMeta and bedwars.BedwarsKitMeta[kit]
 	return (meta and meta.renderImage) or ''
@@ -606,10 +630,39 @@ local function roundPos(vec)
 	return Vector3.new(math.round(vec.X / 3) * 3, math.round(vec.Y / 3) * 3, math.round(vec.Z / 3) * 3)
 end
 
+--[[ Developer-only equip trace (shared.PistonwareDeveloper). Swaps have to be caught while
+the code that asked for them is still on the stack, so this runs before switchItem spawns
+its request. Deduplicated per item and call site over half a second, so a module that
+re-requests the same swap every frame logs it once rather than flooding the console. ]]
+local equipTraceKey, equipTraceAt = nil, 0
+local switchItemRequested = setmetatable({}, {__mode = 'k'})
+local function traceEquip(tool, via)
+	if not shared.PistonwareDeveloper then return end
+	local ok, trace = pcall(debug.traceback, '', 3)
+	trace = ok and trace or ''
+	local now = os.clock()
+	local key = tostring(tool) .. via .. trace
+	if key == equipTraceKey and now - equipTraceAt < 0.5 then return end
+	equipTraceKey, equipTraceAt = key, now
+	local handInv = lplr.Character and lplr.Character:FindFirstChild('HandInvItem')
+	local held = handInv and handInv.Value
+	local cached = store and store.hand and store.hand.tool
+	print(string.format('[pistonware equip] t=%.3f %s: holding %s (store.hand %s) -> %s%s',
+		now, via,
+		held and held.Name or 'nothing',
+		cached and cached.Name or 'nothing',
+		typeof(tool) == 'Instance' and tool.Name or tostring(tool),
+		trace))
+end
+
 local function switchItem(tool, delayTime)
 	delayTime = delayTime or 0.05
 	local check = lplr.Character and lplr.Character:FindFirstChild('HandInvItem') or nil
 	if check and check.Value ~= tool and tool.Parent ~= nil then
+		if shared.PistonwareDeveloper then
+			switchItemRequested[tool] = os.clock()
+			traceEquip(tool, 'switchItem')
+		end
 		task.spawn(function()
 			bedwars.Client:Get(remotes.EquipItem):CallServerAsync({hand = tool})
 		end)
@@ -698,13 +751,15 @@ local kitorder = {
 
 local sortmethods = {
 	Damage = function(a, b)
-		return a.Entity.Character:GetAttribute('LastDamageTakenTime') < b.Entity.Character:GetAttribute('LastDamageTakenTime')
+		-- Guarded: anything that has never taken damage has no attribute, and nil < nil
+		-- throws inside table.sort -- which ends whatever loop was doing the sorting.
+		return (a.Entity.Character:GetAttribute('LastDamageTakenTime') or 0) < (b.Entity.Character:GetAttribute('LastDamageTakenTime') or 0)
 	end,
 	Threat = function(a, b)
 		return getStrength(a.Entity) > getStrength(b.Entity)
 	end,
 	Kit = function(a, b)
-		return (a.Entity.Player and kitorder[a.Entity.Player:GetAttribute('PlayingAsKit')] or 0) > (b.Entity.Player and kitorder[b.Entity.Player:GetAttribute('PlayingAsKit')] or 0)
+		return (a.Entity.Player and kitorder[getPrimaryKit(a.Entity.Player)] or 0) > (b.Entity.Player and kitorder[getPrimaryKit(b.Entity.Player)] or 0)
 	end,
 	Health = function(a, b)
 		return a.Entity.Health < b.Entity.Health
@@ -989,6 +1044,9 @@ run(function()
 		}
 
 		if ent.Player then
+			-- PlayingAsKits is the attribute the game actually updates; the singular one is
+			-- kept for anything still on the older form.
+			table.insert(tab, ent.Player:GetAttributeChangedSignal('PlayingAsKits'))
 			table.insert(tab, ent.Player:GetAttributeChangedSignal('PlayingAsKit'))
 		end
 
@@ -2275,6 +2333,25 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			return {SendToServer = function() end}
 		elseif remoteName == 'SwordSwingMiss' and vape.Modules and vape.Modules.NoClickDelay and vape.Modules.NoClickDelay.Enabled then
 			return {SendToServer = function() end}
+		elseif remoteName == remotes.EquipItem and shared.PistonwareDeveloper then
+			-- Developer trace for equips that bypass switchItem. Every method is forwarded
+			-- to the real object with the real self; only the three that send are logged,
+			-- and a request switchItem has just logged is not logged twice.
+			return setmetatable({}, {__index = function(_, key)
+				local value = call[key]
+				if type(value) ~= 'function' then return value end
+				return function(_, ...)
+					if key == 'CallServerAsync' or key == 'CallServer' or key == 'SendToServer' then
+						local args = ...
+						local tool = type(args) == 'table' and args.hand or nil
+						local fromSwitch = tool and switchItemRequested[tool]
+						if not (fromSwitch and os.clock() - fromSwitch < 0.2) then
+							traceEquip(tool, 'EquipItem:' .. key)
+						end
+					end
+					return value(call, ...)
+				end
+			end})
 		end
 
 		return call
@@ -2356,6 +2433,41 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		one, so the table went instead. A search that stops at the first cost band is cheap
 		enough to run every pass, and Breaker's pass is a quarter of a second long.
 	]]
+	--[[ A block the break code must treat as solid: never dug through, never struck.
+
+	The generic NoBreak attribute is what calculatePath and frontOf used to test, and the
+	Team<id>NoBreak one what breakBlock's last guard tested -- but neither covered our own
+	bed in every case. The per-team attribute is not always there (a Team attribute that has
+	not replicated yet reads as Team-1 and matches nothing), and breakBlock hits the DIG SPOT,
+	which is routinely not the block the caller asked for: the path can route through a cell
+	of our own bed, and Block Check redirects onto whatever is first on the eye line. That is
+	the rare own-bed break.
+
+	So a bed also asks the game, over its whole footprint, the same question isOwnBed in
+	bedwars.lua asks: any cell we are not allowed to break makes it ours. The whole footprint
+	because a bed half carrying a scarab hive reads as breakable on its own. Only beds pay for
+	that; every other block is two attribute reads. ]]
+	local function isProtectedBlock(block, worldpos)
+		if not block then return false end
+		if block:GetAttribute('NoBreak') then return true end
+		if block:GetAttribute('Team'..(lplr:GetAttribute('Team') or -1)..'NoBreak') ~= nil then return true end
+		if collectionService:HasTag(block, 'bed') then
+			local cells
+			pcall(function()
+				local handler = bedwars.BlockController:getHandlerRegistry():getHandler(block.Name)
+				cells = handler and handler:getContainedPositions(block)
+			end)
+			cells = cells or {bedwars.BlockController:getBlockPosition(worldpos)}
+			for _, cell in cells do
+				local ok, breakable = pcall(function()
+					return bedwars.BlockController:isBlockBreakable({blockPosition = cell}, lplr)
+				end)
+				if ok and breakable == false then return true end
+			end
+		end
+		return false
+	end
+
 	local function calculatePath(target, blockpos)
 		local origin = entitylib.isAlive and entitylib.character.RootPart.Position or Vector3.zero
 		local visited, distances, path = {}, {[blockpos] = 0}, {}
@@ -2423,7 +2535,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 				if visited[side] then continue end
 
 				local block = getPlacedBlock(side)
-				if not block or block:GetAttribute('NoBreak') or block == target then
+				if not block or block == target or isProtectedBlock(block, side) then
 					if not block then
 						touchesair = true
 					end
@@ -2519,12 +2631,54 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 				Hand the spot back unchanged, and say so: 'nothing in the way' and 'no way
 				through' arrive as the same spot otherwise, and the caller has to tell a
 				clear shot from a sealed one. ]]
-				if block:GetAttribute('NoBreak') then return worldpos, true end
+				if isProtectedBlock(block, cell * 3) then return worldpos, true end
 				return cell * 3
 			end
 		end
 
 		return worldpos
+	end
+
+	--[[ Is there a clear line onto this cell from ANY of its visible faces?
+
+	frontOf aims at the cell's centre, and a line to the centre clips whatever sits beside the
+	target even when a face of the target is in plain view -- a line down onto a bed grazes the
+	ore block next to it, so Block Check sent the break into the ore and the bed waited. That
+	is the ores-before-bed report. The centre, the top face and the faces turned toward the
+	player are each tried, kept 1.4 studs in so every point still lies inside the same cell;
+	any one of them with nothing in the way means the target itself can be hit.
+
+	Returns the spot to strike and whether the way is sealed, the same pair frontOf returns,
+	and falls back to frontOf's answer for the centre when every line is blocked. ]]
+	local function clearShot(pos)
+		if not entitylib.isAlive then return pos, false end
+		local head = entitylib.character.Head
+		local origin = (head and head.Position) or entitylib.character.RootPart.Position
+		local toward = origin - pos
+
+		local offsets = {Vector3.zero, Vector3.new(0, 1.4, 0)}
+		if math.abs(toward.X) > 0.01 then
+			table.insert(offsets, Vector3.new(math.sign(toward.X) * 1.4, 0, 0))
+		end
+		if math.abs(toward.Z) > 0.01 then
+			table.insert(offsets, Vector3.new(0, 0, math.sign(toward.Z) * 1.4))
+		end
+		if toward.Y < 0 then
+			table.insert(offsets, Vector3.new(0, -1.4, 0))
+		end
+
+		local firstFront, firstSealed
+		for i, offset in offsets do
+			local point = pos + offset
+			local front, sealed = frontOf(point)
+			if front == point and not sealed then
+				return pos, false
+			end
+			if i == 1 then
+				firstFront, firstSealed = front, sealed
+			end
+		end
+		return firstFront, firstSealed
 	end
 
 	--[[ Suppressing the place-block animation has to be re-entrancy safe.
@@ -2607,6 +2761,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		local selfpos = entitylib.character.RootPart.Position
 		local positions = (handler and handler:getContainedPositions(block)) or {block.Position / 3}
 		local direct = false
+		local open = false
 
 		for _, v in positions do
 			local cell = v * 3
@@ -2624,14 +2779,26 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 				local score = method == 'Distance' and (selfpos - dpos).Magnitude or dcost
 				--[[ Kept a strict boolean: a single-celled block offers one candidate, so for
 				every caller but a bed this collapses to the original `score < cost` ]]
+				--[[ With Block Check on, a candidate that can be struck directly beats one that
+				would be redirected onto something in front of it -- so a bed with one clear
+				cell is hit there rather than through the ore or wall beside the other. ]]
+				local dopen = true
+				if blockcheck then
+					local front, sealed = clearShot(dpos)
+					dopen = (not sealed) and front == dpos
+				end
 				local better
-				if ddirect ~= direct then
+				if pos == nil then
+					better = true
+				elseif dopen ~= open then
+					better = dopen
+				elseif ddirect ~= direct then
 					better = ddirect
 				else
 					better = score < cost
 				end
 				if better then
-					cost, pos, target, path, direct = score, dpos, cell, dpath, ddirect
+					cost, pos, target, path, direct, open = score, dpos, cell, dpath, ddirect, dopen
 				end
 			end
 		end
@@ -2650,7 +2817,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		the line is what the march meets first, so it hands back exactly that spot. An open
 		bed you can see is hit; the same bed with wool in front of it gets the wool stripped. ]]
 		if blockcheck and pos then
-			local front = frontOf(pos)
+			local front, sealed = clearShot(pos)
+			--[[ Something that must not be broken -- our own bed, a NoBreak block -- stands in
+			every line. There is no shot, and hitting the spot anyway is swinging through it. ]]
+			if sealed then return end
 			if front ~= pos then
 				--[[ path described the old target; drop it so the visualiser stops drawing a
 				chain that no longer leads anywhere ]]
@@ -2671,7 +2841,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			caller's own filtering says nothing about what ends up taking the damage, and the
 			one thing that must never take damage is our own bed. One attribute read, the
 			same one the game marks it with. ]]
-			if dblock:GetAttribute('Team'..(lplr:GetAttribute('Team') or -1)..'NoBreak') ~= nil then return end
+			if isProtectedBlock(dblock, dpos * 3) then return end
 
 			--[[ The recent-swing gate keeps the sword in hand mid-fight for callers that
 			pass autotool=false. When the caller explicitly asked for AutoTool it has
@@ -2845,6 +3015,23 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end
 
 	local storeChanged = bedwars.Store.changed:connect(updateStore)
+
+	-- Developer trace: every change to what the character is actually holding, whoever
+	-- made it. A swap logged here with no switchItem or EquipItem line just before it did
+	-- not come from a request this client sent.
+	if shared.PistonwareDeveloper then
+		local function watchHand(char)
+			local handInv = char:WaitForChild('HandInvItem', 10)
+			if not handInv then return end
+			vape:Clean(handInv:GetPropertyChangedSignal('Value'):Connect(function()
+				local tool = handInv.Value
+				print(string.format('[pistonware equip] t=%.3f hand changed -> %s',
+					os.clock(), tool and tool.Name or 'nothing'))
+			end))
+		end
+		if lplr.Character then task.spawn(watchHand, lplr.Character) end
+		vape:Clean(lplr.CharacterAdded:Connect(watchHand))
+	end
 	updateStore(bedwars.Store:getState(), {})
 	
 	for _, event in {'MatchEndEvent', 'EntityDeathEvent', 'BedwarsBedBreak', 'BalloonPopped', 'AngelProgress', 'GrapplingHookFunctions'} do
@@ -3152,6 +3339,21 @@ run(function()
 	local ClickAim
 	local Shake
 	local TargetPriority
+	local FirstPersonOnly
+
+	--[[ The game's own test, from CameraPerspectiveController (decompile:
+	camera-perspective-controller): perspective 0 is first person, and it is 0 whenever the
+	camera sits within a stud of its focus. The controller re-caches it every render step, so
+	its answer is read when it can be; the same formula stands in if it can't. ]]
+	local function inFirstPerson()
+		local ok, perspective = pcall(function()
+			return bedwars.CameraPerspectiveController:getCameraPerspective()
+		end)
+		if ok and type(perspective) == 'number' then
+			return perspective == 0
+		end
+		return (gameCamera.CFrame.Position - gameCamera.Focus.Position).Magnitude <= 1
+	end
 
 	--[[ Shake nudges the aim off the target's RootPart by a random angle. Rolled as an
 	ANGLE rather than a world-space offset so the slider means the same thing at 3
@@ -3227,7 +3429,8 @@ run(function()
 			end
 			if callback then
 				AimAssist:Clean(runService.Heartbeat:Connect(function(dt)
-					if entitylib.isAlive and store.hand.toolType == 'sword' and ((not ClickAim.Enabled) or (os.clock() - bedwars.SwordController.lastSwing) < 0.4) then
+					if entitylib.isAlive and store.hand.toolType == 'sword' and ((not ClickAim.Enabled) or (os.clock() - bedwars.SwordController.lastSwing) < 0.4)
+						and not (FirstPersonOnly.Enabled and not inFirstPerson()) then
 						local ent = findAimTarget()
 	
 						if ent then
@@ -3314,6 +3517,10 @@ run(function()
 		Name = 'Use killaura target'
 	})
 	StrafeIncrease = AimAssist:CreateToggle({Name = 'Strafe increase'})
+	FirstPersonOnly = AimAssist:CreateToggle({
+		Name = 'First Person Only',
+		Tooltip = 'Only pulls your aim while the camera is in first person'
+	})
 end)
 	
 run(function()
@@ -3687,26 +3894,16 @@ end)
 run(function()
 	local TriggerBot
 	local CPS
-	local AFKCheck
+	local SelfAFK
 	local rayParams = RaycastParams.new()
 
-	local function isPlayerAfk(player)
-		if not player then return false end
-		for _, attribute in {'AFK', 'IsAFK', 'Afk', 'afk'} do
-			local value
-			pcall(function() value = player:GetAttribute(attribute) end)
-			if value == true then return true end
-		end
-		return false
-	end
-	
 	TriggerBot = vape.Categories.Combat:CreateModule({
 		Name = 'TriggerBot',
 		Function = function(callback)
 			if callback then
 				repeat
 					local doAttack
-					if not bedwars.AppController:isLayerOpen(bedwars.UILayers.MAIN) then
+					if not bedwars.AppController:isLayerOpen(bedwars.UILayers.MAIN) and not (SelfAFK.Enabled and isLocalAfk()) then
 						if entitylib.isAlive and store.hand.toolType == 'sword' and bedwars.DaoController.chargingMaid == nil then
 							local attackRange = bedwars.ItemMeta[store.hand.tool.Name].sword.attackRange
 							rayParams.FilterDescendantsInstances = {lplr.Character}
@@ -3718,7 +3915,6 @@ run(function()
 							if ray and (localPos - ray.Instance.Position).Magnitude <= rayRange then
 								for _, ent in entitylib.List do
 									doAttack = ent.Targetable and ray.Instance:IsDescendantOf(ent.Character) and (localPos - ent.RootPart.Position).Magnitude <= rayRange
-										and not (AFKCheck.Enabled and isPlayerAfk(ent.Player))
 									if doAttack then
 										break
 									end
@@ -3727,14 +3923,7 @@ run(function()
 	
 							local regionTarget = bedwars.SwordController:getTargetInRegion(attackRange or 3.8 * 3, 0)
 							if regionTarget then
-								local targetPlayer
-								pcall(function()
-									local targetModel = regionTarget:getInstance()
-									targetPlayer = playersService:GetPlayerFromCharacter(targetModel)
-								end)
-								if not (AFKCheck.Enabled and isPlayerAfk(targetPlayer)) then
-									doAttack = true
-								end
+								doAttack = true
 							end
 							if doAttack then
 								bedwars.SwordController:swingSwordAtMouse()
@@ -3754,6 +3943,10 @@ run(function()
 		Max = 9,
 		DefaultMin = 7,
 		DefaultMax = 7
+	})
+	SelfAFK = TriggerBot:CreateToggle({
+		Name = 'AFK check',
+		Tooltip = 'Stops attacking once you have not touched your mouse or keyboard for 30 seconds'
 	})
 end)
 	
@@ -4029,6 +4222,7 @@ run(function()
 	local BlacklistBeds
 	local BlacklistOres
 	local BlacklistHive
+	local BlacklistCrops
 
 	--[[ The cooldown the game ships with, restored on disable and used as the "don't
 	speed this one up" value for blacklisted blocks. ]]
@@ -4056,12 +4250,39 @@ run(function()
 		return name:find('ore_mesh_block', 1, true) ~= nil or name:match('_ore$') ~= nil
 	end
 
+	--[[ Crops are whatever the game's crop-meta has a config for -- pumpkin, carrot, melon
+	and Taliyah's egg block today -- so a new crop is covered without editing a list here.
+	Cached per block name, since this runs every frame while a blacklist is on. ]]
+	local cropMeta
+	local cropCache = {}
+	local function isCrop(name)
+		if type(name) ~= 'string' then return false end
+		local cached = cropCache[name]
+		if cached ~= nil then return cached end
+		if cropMeta == nil then
+			local ok, res = pcall(function()
+				return require(replicatedStorage.TS.crop['crop-meta'])
+			end)
+			cropMeta = ok and res or false
+		end
+		local result
+		if cropMeta and cropMeta.getCropConfig then
+			local ok, config = pcall(cropMeta.getCropConfig, name)
+			result = ok and config ~= nil
+		else
+			result = name == 'pumpkin' or name == 'carrot' or name == 'melon'
+		end
+		cropCache[name] = result
+		return result
+	end
+
 	local function currentCooldown()
 		local name = targetedBlockName()
 		if name then
 			if BlacklistBeds.Enabled and name == 'bed' then return VANILLA_COOLDOWN end
 			if BlacklistOres.Enabled and isOre(name) then return VANILLA_COOLDOWN end
 			if BlacklistHive.Enabled and name == 'beehive' then return VANILLA_COOLDOWN end
+			if BlacklistCrops.Enabled and isCrop(name) then return VANILLA_COOLDOWN end
 		end
 		return Time.Value
 	end
@@ -4076,7 +4297,7 @@ run(function()
 					to react the frame the crosshair moves onto a blacklisted block,
 					otherwise the stale value lets a fast hit or two through before the
 					next poll catches up -- so tighten to per-frame only in that case. ]]
-					local filtering = BlacklistBeds.Enabled or BlacklistOres.Enabled or BlacklistHive.Enabled
+					local filtering = BlacklistBeds.Enabled or BlacklistOres.Enabled or BlacklistHive.Enabled or BlacklistCrops.Enabled
 					bedwars.BlockBreakController.blockBreaker:setCooldown(filtering and currentCooldown() or Time.Value)
 					if filtering then
 						task.wait()
@@ -4109,6 +4330,10 @@ run(function()
 	BlacklistHive = FastBreak:CreateToggle({
 		Name = 'Blacklist Hive',
 		Tooltip = 'Leaves beehives at normal breaking speed'
+	})
+	BlacklistCrops = FastBreak:CreateToggle({
+		Name = 'Blacklist Crops',
+		Tooltip = 'Leaves crops at normal breaking speed'
 	})
 end)
 	
@@ -4602,245 +4827,124 @@ run(function()
 end)
 	
 run(function()
-    local KitESP
-    local Background
-    local Color = {}
-    local Reference = {}
-    --[[ model -> adornee part recorded at billboard creation, so removal cleanup
-    doesn't depend on PrimaryPart still being set (it's often nil by then) ]]
-    local ModelParts = {}
-    --[[ per-kit tag connections, disconnected whenever the tracked kit changes ]]
-    local kitConns = {}
-    local Folder = Instance.new('Folder')
-    Folder.Parent = vape.gui
+	local KitESP
+	local Background
+	local Color = {}
+	local Reference = {}
+	local connections = {}
+	local Folder = Instance.new('Folder')
+	Folder.Parent = vape.gui
 
-    local ESPKits = {
-        alchemist = {'alchemist_ingedients', 'wild_flower'},
-        beekeeper = {'bee', 'bee'},
-        bigman = {'treeOrb', 'natures_essence_1'},
-        ghost_catcher = {'ghost', 'ghost_orb'},
-        metal_detector = {'hidden-metal', 'iron'},
-        sheep_herder = {'SheepModel', 'purple_hay_bale'},
-        sorcerer = {'alchemy_crystal', 'wild_flower'},
-        star_collector = {'stars', 'crit_star'}
-    }
+	local ESPKits = {
+		alchemist = {'alchemist_ingedients', 'wild_flower'},
+		beekeeper = {'bee', 'bee'},
+		bigman = {'treeOrb', 'natures_essence_1'},
+		ghost_catcher = {'ghost', 'ghost_orb'},
+		metal_detector = {'hidden-metal', 'iron'},
+		sheep_herder = {'SheepModel', 'purple_hay_bale'},
+		sorcerer = {'alchemy_crystal', 'wild_flower'},
+		star_collector = {'stars', 'crit_star'}
+	}
 
-    local function Added(v, icon)
-        if not v then return end
-        --[[ Billboards live under vape.gui (CoreGui). Tag/added signals invoke this
-        on game threads at identity 2, where parenting into CoreGui silently
-        throws — which is why only enable-time (exploit thread) objects showed. ]]
-        if vape.ThreadFix then
-            setthreadidentity(8)
-        end
-        if Reference[v] then
-            if Reference[v].Billboard then
-                Reference[v].Billboard:Destroy()
-            end
-            Reference[v] = nil
-        end
+	local function Added(ent, icon)
+		local part = ent:IsA('BasePart') and ent or ent:IsA('Model') and (ent.PrimaryPart or ent:FindFirstChild('Root') or ent:FindFirstChildWhichIsA('BasePart'))
+		if not part or Reference[ent] then return end
 
-        local billboard = Instance.new('BillboardGui')
-        billboard.Parent = Folder
-        billboard.Name = icon
-        billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
-        billboard.Size = UDim2.fromOffset(36, 36)
-        billboard.AlwaysOnTop = true
-        billboard.ClipsDescendants = false
-        billboard.Adornee = v
+		local billboard = Instance.new('BillboardGui')
+		billboard.Name = icon
+		billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
+		billboard.Size = UDim2.fromOffset(36, 36)
+		billboard.AlwaysOnTop = true
+		billboard.ClipsDescendants = false
+		billboard.Adornee = part
+		billboard.Parent = Folder
+		local blur = addBlur(billboard)
+		blur.Visible = Background.Enabled
+		local image = Instance.new('ImageLabel')
+		image.Size = UDim2.fromOffset(36, 36)
+		image.Position = UDim2.fromScale(0.5, 0.5)
+		image.AnchorPoint = Vector2.new(0.5, 0.5)
+		image.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+		image.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
+		image.BorderSizePixel = 0
+		image.Image = bedwars.getIcon({itemType = icon}, true)
+		image.Parent = billboard
+		local uicorner = Instance.new('UICorner')
+		uicorner.CornerRadius = UDim.new(0, 4)
+		uicorner.Parent = image
+		Reference[ent] = billboard
+	end
 
-        local blur = addBlur(billboard)
-        blur.Visible = Background.Enabled
+	KitESP = vape.Categories.Render:CreateModule({
+		Name = 'KitESP',
+		Function = function(callback)
+			if callback then
+				local current
+				repeat
+					if store.equippedKit ~= current then
+						current = store.equippedKit
+						for _, v in connections do
+							v:Disconnect()
+						end
+						table.clear(connections)
+						table.clear(Reference)
+						Folder:ClearAllChildren()
 
-        local image = Instance.new('ImageLabel')
-        image.Name = "ImageLabel"
-        image.Size = UDim2.fromOffset(36, 36)
-        image.Position = UDim2.fromScale(0.5, 0.5)
-        image.AnchorPoint = Vector2.new(0.5, 0.5)
-        image.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-        image.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
-        image.BorderSizePixel = 0
-        image.Image = bedwars.getIcon({itemType = icon}, true)
-        image.Parent = billboard
+						local kit = ESPKits[current]
+						if kit then
+							table.insert(connections, collectionService:GetInstanceAddedSignal(kit[1]):Connect(function(ent)
+								Added(ent, kit[2])
+							end))
+							table.insert(connections, collectionService:GetInstanceRemovedSignal(kit[1]):Connect(function(ent)
+								if Reference[ent] then
+									Reference[ent]:Destroy()
+									Reference[ent] = nil
+								end
+							end))
+							for _, v in collectionService:GetTagged(kit[1]) do
+								Added(v, kit[2])
+							end
+						end
+					end
+					task.wait(1)
+				until not KitESP.Enabled
+			else
+				for _, v in connections do
+					v:Disconnect()
+				end
+				table.clear(connections)
+				table.clear(Reference)
+				Folder:ClearAllChildren()
+			end
+		end,
+		Tooltip = 'ESP for certain kit related objects'
+	})
 
-        local uicorner = Instance.new('UICorner')
-        uicorner.CornerRadius = UDim.new(0, 4)
-        uicorner.Parent = image
-
-        --[[ Store all references including Blur and ImageLabel ]]
-        Reference[v] = {
-            Billboard = billboard,
-            Blur = blur,
-            ImageLabel = image
-        }
-    end
-
-    --[[ The part a billboard hangs off.
-
-    PrimaryPart on its own was the mistake, and the beekeeper skins are where it shows.
-    The stock Assets.Effects.Bee model has PrimaryPart set -- to its Root part -- but
-    MeadowBee, the model the Meadow Beekeeper skin swaps in through
-    BedwarsKitSkinMeta[MEADOW_BEEKEEPER].beekeeper.beeModel, has no PrimaryPart set at
-    all. So the wait below timed out on every bee and not one billboard was built.
-
-    The game never needed it either: bee-controller reaches for `beeModel.Root` by name
-    and moves the bee with PivotTo, which falls back to the bounding box when there is no
-    PrimaryPart. Root is also where it parents every constraint it adds, so Root is the
-    real anchor and PrimaryPart was only ever a convenience the stock asset happened to
-    carry. Any BasePart after that, so a model authored without either still gets a
-    billboard somewhere sensible instead of none.
-
-    A tagged BasePart is handled up front because indexing PrimaryPart on one throws
-    rather than returning nil, and these tags are the game's, not ours. ]]
-    local function espPart(v)
-        if v:IsA('BasePart') then return v end
-        if not v:IsA('Model') then return nil end
-        return v.PrimaryPart or v:FindFirstChild('Root') or v:FindFirstChildWhichIsA('BasePart')
-    end
-
-    --[[ A model is often tagged a frame before its parts are in place, so a first look
-    that comes back empty is retried rather than dropped (that is why this used to work
-    only after a disable/re-enable, once the models had finished building). ]]
-    local function addWhenReady(v, icon)
-        if not v then return end
-        local part = espPart(v)
-        if part then
-            ModelParts[v] = part
-            Added(part, icon)
-            return
-        end
-        task.spawn(function()
-            local timeout = os.clock() + 5
-            while not part and v.Parent and os.clock() < timeout do
-                task.wait()
-                part = espPart(v)
-            end
-            if part and KitESP and KitESP.Enabled then
-                ModelParts[v] = part
-                Added(part, icon)
-            end
-        end)
-    end
-
-    --[[ Drops every billboard and per-kit tag connection. Called on disable AND on
-    kit change, so stale objects from the previous kit can't linger. ]]
-    local function clearTracked()
-        for _, c in kitConns do
-            pcall(function() c:Disconnect() end)
-        end
-        table.clear(kitConns)
-        if vape.ThreadFix then
-            setthreadidentity(8)
-        end
-        Folder:ClearAllChildren()
-        table.clear(Reference)
-        table.clear(ModelParts)
-    end
-
-    local function addKit(tag, icon)
-        table.insert(kitConns, collectionService:GetInstanceAddedSignal(tag):Connect(function(v)
-            addWhenReady(v, icon)
-        end))
-
-        table.insert(kitConns, collectionService:GetInstanceRemovedSignal(tag):Connect(function(v)
-            -- espPart, not PrimaryPart, or a skinned model's billboard outlives it
-            local part = ModelParts[v] or espPart(v)
-            ModelParts[v] = nil
-            if part and Reference[part] then
-                if vape.ThreadFix then
-                    setthreadidentity(8)
-                end
-                if Reference[part].Billboard then
-                    Reference[part].Billboard:Destroy()
-                end
-                Reference[part] = nil
-            end
-        end))
-
-        for _, v in pairs(collectionService:GetTagged(tag)) do
-            addWhenReady(v, icon)
-        end
-    end
-
-    --[[ Bumped each toggle so a stale enable-loop from a quick off/on can't keep
-    running alongside the new one. ]]
-    local loopId = 0
-
-    KitESP = vape.Categories.Render:CreateModule({
-        Name = 'KitESP',
-        Function = function(callback)
-            loopId += 1
-            if callback then
-                local myId = loopId
-
-                if KitESP.Clean then
-                    KitESP:Clean(vapeEvents.EntityDeathEvent.Event:Connect(function(deathTable)
-                        local deadEnt = entitylib.getEntity(deathTable.entityInstance)
-                        if deadEnt and deadEnt.RootPart and Reference[deadEnt.RootPart] then
-                            if vape.ThreadFix then
-                                setthreadidentity(8)
-                            end
-                            if Reference[deadEnt.RootPart].Billboard then
-                                Reference[deadEnt.RootPart].Billboard:Destroy()
-                            end
-                            Reference[deadEnt.RootPart] = nil
-                        end
-                    end))
-                end
-
-                --[[ Kits can change mid-session (kit swap, new match): whenever the
-                equipped kit differs from what we're tracking, wipe the old
-                kit's billboards/connections and start tracking the new tag. ]]
-                local lastKit = nil
-                repeat
-                    local kit = store.equippedKit
-                    if kit ~= lastKit then
-                        lastKit = kit
-                        clearTracked()
-                        local info = ESPKits[kit]
-                        if info then
-                            addKit(info[1], info[2])
-                        end
-                    end
-                    task.wait(0.5)
-                until (not KitESP.Enabled) or loopId ~= myId
-            else
-                clearTracked()
-            end
-        end,
-        Tooltip = 'ESP for the kit objects lying around the map'
-    })
-
-    Background = KitESP:CreateToggle({
-        Name = 'Background',
-        Function = function(callback)
-            if Color.Object then Color.Object.Visible = callback end
-            for _, v in pairs(Reference) do
-                if v.ImageLabel then
-                    v.ImageLabel.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
-                end
-                if v.Blur then
-                    v.Blur.Visible = callback
-                end
-            end
-        end,
-        Default = true
-    })
-
-    Color = KitESP:CreateColorSlider({
-        Name = 'Background Color',
-        DefaultValue = 0,
-        DefaultOpacity = 0.5,
-        Function = function(hue, sat, val, opacity)
-            for _, v in pairs(Reference) do
-                if v.ImageLabel then
-                    v.ImageLabel.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-                    v.ImageLabel.BackgroundTransparency = 1 - opacity
-                end
-            end
-        end,
-        Darker = true
-    })
+	Background = KitESP:CreateToggle({
+		Name = 'Background',
+		Function = function(callback)
+			if Color.Object then
+				Color.Object.Visible = callback
+			end
+			for _, v in Reference do
+				v.ImageLabel.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
+				v.Blur.Visible = callback
+			end
+		end,
+		Default = true
+	})
+	Color = KitESP:CreateColorSlider({
+		Name = 'Background Color',
+		DefaultValue = 0,
+		DefaultOpacity = 0.5,
+		Function = function(hue, sat, val, opacity)
+			for _, v in Reference do
+				v.ImageLabel.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+				v.ImageLabel.BackgroundTransparency = 1 - (Background.Enabled and opacity or 0)
+			end
+		end,
+		Darker = true
+	})
 end)
 
 --[[ The game's own nametags, and who wants them gone.
@@ -4918,6 +5022,16 @@ run(function()
 	local DistanceCheck
 	local DistanceLimit
 	local Strings, Sizes, Reference = {}, {}, {}
+	--[[ Tags part way through Added.Normal, keyed by entity to a token owned by that one
+	build. Kept apart from Reference because the build YIELDS: getfontsize is
+	TextService:GetTextBoundsAsync. It used to claim Reference[ent] before measuring, so the
+	render loop -- which drops any Reference entry whose label has no Parent yet -- deleted
+	the half-built tag during that yield, and the build then saw Reference no longer pointing
+	at its label and destroyed it. Nothing rebuilt it until that player's health or equipment
+	next changed, which is the "some people just have no tag" report. ]]
+	local Building = {}
+	-- per-entity update generation, see Updated.Normal
+	local UpdateGen = {}
 
 	local Folder
 	
@@ -5148,12 +5262,13 @@ run(function()
 
 	local Added = {
 		Normal = function(ent)
+			local token = {}
 			pcall(function()
 				if not passesFilter(ent) then return end
-				if Reference[ent] then return end --[[ Prevent duplicates ]]
+				if Reference[ent] or Building[ent] then return end --[[ Prevent duplicates ]]
+				Building[ent] = token
 
 				local nametag = Instance.new('TextLabel')
-				Reference[ent] = nametag
 				Strings[ent] = hideNames(ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name)
 
 				if Device.Enabled and ent.Player then
@@ -5165,7 +5280,7 @@ run(function()
 
 				if Health.Enabled then
 					local healthColor = tagHealthColor(ent)
-					Strings[ent] = Strings[ent]..' <font color="rgb('..tostring(math.floor(healthColor.R * 255))..','..tostring(math.floor(healthColor.G * 255))..','..tostring(math.floor(healthColor.B * 255))..')">'..math.round(ent.Health)..'</font>'
+					Strings[ent] = Strings[ent]..' <font color="rgb('..tostring(math.floor(healthColor.R * 255))..','..tostring(math.floor(healthColor.G * 255))..','..tostring(math.floor(healthColor.B * 255))..')">'..math.round(ent.Health or 0)..'</font>'
 				end
 
 				if Distance.Enabled then
@@ -5190,7 +5305,8 @@ run(function()
 				nametag.TextSize = 14 * Scale.Value
 				nametag.FontFace = FontOption.Value
 				local size = getfontsize(removeTags(Strings[ent]), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
-				if Reference[ent] ~= nametag then
+				-- getfontsize yielded: a removal or a restart in the meantime cancels this build
+				if Building[ent] ~= token then
 					nametag:Destroy()
 					return
 				end
@@ -5249,12 +5365,20 @@ run(function()
 				nametag.Text = Strings[ent]
 				nametag.TextColor3 = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 				nametag.RichText = true
-				if Reference[ent] ~= nametag then
+				if Building[ent] ~= token then
 					nametag:Destroy()
 					return
 				end
+				-- Only now does it become a real tag: finished and parented in the same step,
+				-- so the render loop never meets one without a Parent.
+				Reference[ent] = nametag
+				Building[ent] = nil
 				nametag.Parent = Folder
 			end)
+			-- A build that threw part way must not leave the entity marked as in progress.
+			if Building[ent] == token then
+				Building[ent] = nil
+			end
 		end,
 		Drawing = function(ent)
 			pcall(function()
@@ -5283,7 +5407,7 @@ run(function()
 				end
 
 				if Health.Enabled then
-					Strings[ent] = Strings[ent]..' '..math.round(ent.Health)
+					Strings[ent] = Strings[ent]..' '..math.round(ent.Health or 0)
 				end
 
 				if Distance.Enabled then
@@ -5300,6 +5424,9 @@ run(function()
 	
 	local Removed = {
 		Normal = function(ent)
+			-- cancels a build that is still yielding in getfontsize
+			Building[ent] = nil
+			UpdateGen[ent] = nil
 			pcall(function()
 				unwatchEnchant(ent)
 				local v = Reference[ent]
@@ -5414,11 +5541,27 @@ run(function()
 					rebuildTag(ent, 'Normal')
 					return
 				end
-				
+
 				if vape.ThreadFix then
 					setthreadidentity(8)
 				end
-				Sizes[ent] = nil
+
+				--[[ Health used to be the LAST thing this wrote, which is why it stopped updating.
+
+				The new text was built first but only put on the label at the very end, after the
+				equipment, kit, rank and enchant icons -- all under the one pcall. Any of those
+				throwing (an inventory that has not replicated yet, an icon lookup) abandoned the
+				update before the text was ever written, so the number stayed at whatever the
+				last clean pass left. And the getfontsize just before it yields, so an older
+				update resuming late could put an older health back over a newer one, and it
+				wrote the raw string -- with Distance on that replaced the formatted distance the
+				render loop had just drawn.
+
+				So: a generation per entity so only the newest update finishes, the text written
+				straight away and already formatted, and every icon on its own pcall. ]]
+				local gen = (UpdateGen[ent] or 0) + 1
+				UpdateGen[ent] = gen
+
 				Strings[ent] = hideNames(ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name)
 
 				if Device.Enabled and ent.Player then
@@ -5430,48 +5573,67 @@ run(function()
 
 				if Health.Enabled then
 					local healthColor = tagHealthColor(ent)
-					Strings[ent] = Strings[ent]..' <font color="rgb('..tostring(math.floor(healthColor.R * 255))..','..tostring(math.floor(healthColor.G * 255))..','..tostring(math.floor(healthColor.B * 255))..')">'..math.round(ent.Health)..'</font>'
+					Strings[ent] = Strings[ent]..' <font color="rgb('..tostring(math.floor(healthColor.R * 255))..','..tostring(math.floor(healthColor.G * 255))..','..tostring(math.floor(healthColor.B * 255))..')">'..math.round(ent.Health or 0)..'</font>'
 				end
 
 				if Distance.Enabled then
 					Strings[ent] = '<font color="rgb(85, 255, 85)">[</font><font color="rgb(255, 255, 255)">%s</font><font color="rgb(85, 255, 85)">]</font> '..Strings[ent]
+					local selfRoot = entitylib.isAlive and entitylib.character.RootPart
+					local root = ent.RootPart
+					local mag = (selfRoot and root) and math.floor((selfRoot.Position - root.Position).Magnitude) or 0
+					nametag.Text = string.format(Strings[ent], mag)
+					Sizes[ent] = mag
+				else
+					nametag.Text = Strings[ent]
+					Sizes[ent] = nil
 				end
 
-				if Equipment.Enabled and store.inventories[ent.Player] and nametag:FindFirstChild("Hand") then
-					local inventory = store.inventories[ent.Player]
-					nametag.Hand.Image = bedwars.getIcon(inventory.hand or {itemType = ''}, true)
-					nametag.Helmet.Image = bedwars.getIcon(inventory.armor[4] or {itemType = ''}, true)
-					nametag.Chestplate.Image = bedwars.getIcon(inventory.armor[5] or {itemType = ''}, true)
-					nametag.Boots.Image = bedwars.getIcon(inventory.armor[6] or {itemType = ''}, true)
+				if Equipment.Enabled and ent.Player and nametag:FindFirstChild('Hand') then
+					pcall(function()
+						local inventory = store.inventories[ent.Player]
+						if not inventory then return end
+						local armor = inventory.armor or {}
+						nametag.Hand.Image = bedwars.getIcon(inventory.hand or {itemType = ''}, true)
+						nametag.Helmet.Image = bedwars.getIcon(armor[4] or {itemType = ''}, true)
+						nametag.Chestplate.Image = bedwars.getIcon(armor[5] or {itemType = ''}, true)
+						nametag.Boots.Image = bedwars.getIcon(armor[6] or {itemType = ''}, true)
+					end)
 				end
 
 				-- FindFirstChild, not an index: the icon only exists when the toggle was on at
 				-- the moment this tag was built.
 				if ShowKit.Enabled and ent.Player then
-					local icon = nametag:FindFirstChild('Kit')
-					if icon then
-						icon.Image = getKitRenderImage(ent.Player)
-					end
+					pcall(function()
+						local icon = nametag:FindFirstChild('Kit')
+						if icon then
+							icon.Image = getKitRenderImage(ent.Player)
+						end
+					end)
 				end
 
 				if Rank.Enabled and ent.Player then
-					local icon = nametag:FindFirstChild('RankIcon')
-					if icon then
-						icon.Image = getRankImage(ent.Player) or ''
-					end
+					pcall(function()
+						local icon = nametag:FindFirstChild('RankIcon')
+						if icon then
+							icon.Image = getRankImage(ent.Player) or ''
+						end
+					end)
 				end
 
 				if Enchant.Enabled and ent.Player then
-					local icon = nametag:FindFirstChild('EnchantIcon')
-					if icon then
-						icon.Image = getEnchantImage(ent.Player) or ''
-					end
+					pcall(function()
+						local icon = nametag:FindFirstChild('EnchantIcon')
+						if icon then
+							icon.Image = getEnchantImage(ent.Player) or ''
+						end
+					end)
 				end
 
-				local size = getfontsize(removeTags(Strings[ent]), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+				local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+				-- getfontsize yielded: a newer update, or a removed tag, owns the label now
+				if UpdateGen[ent] ~= gen or Reference[ent] ~= nametag then return end
 				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 				positionIcons(nametag, size.X, size.Y + 7)
-				nametag.Text = Strings[ent]
 			end)
 		end,
 		Drawing = function(ent)
@@ -5511,7 +5673,7 @@ run(function()
 				end
 
 				if Health.Enabled then
-					Strings[ent] = Strings[ent]..' '..math.round(ent.Health)
+					Strings[ent] = Strings[ent]..' '..math.round(ent.Health or 0)
 				end
 
 				if Distance.Enabled then
@@ -5721,6 +5883,9 @@ run(function()
 			end)
 		end
 		table.clear(NameTags.Connections)
+		-- any build still yielding belongs to the setup being dropped
+		table.clear(Building)
+		table.clear(UpdateGen)
 
 		showGameNametags('nametags')
 
@@ -5785,6 +5950,28 @@ run(function()
 				if Loop[methodused] then
 					NameTags:Clean(runService.RenderStepped:Connect(Loop[methodused]))
 				end
+
+				--[[ Once a second, anyone who should have a tag and does not gets one.
+
+				EntityUpdated is the only other thing that rebuilds a missing tag, and it fires
+				on health, equipment and team changes -- a player standing still at full health
+				can go a long time without any of those. Added applies the Targets and Priority
+				Only filters itself and skips anyone tagged or mid-build, so this only ever fills
+				a gap: an entity deliberately left untagged stays untagged. ]]
+				local sweepAt = 0
+				NameTags:Clean(runService.Heartbeat:Connect(function()
+					local now = os.clock()
+					if now < sweepAt then return end
+					sweepAt = now + 1
+					local add = Added[methodused]
+					if not add then return end
+					for _, ent in entitylib.List do
+						local root = ent.RootPart
+						if not Reference[ent] and not Building[ent] and root and root.Parent and not supersededEntity(ent) then
+							add(ent)
+						end
+					end
+				end))
 
 				--[[ UserInputType can replicate after the tag was built (and changes when a
 				player switches input), and the tag is only rebuilt on health/equipment
@@ -7035,7 +7222,11 @@ end)
 	
 run(function()
 	local BedProtector
-	
+
+	--[[ Never used as a wall: they are blocks by meta, but a defense made of TNT is a trap for
+	whoever holds the bed, and a cannon is not a wall at all. ]]
+	local SKIP_BLOCKS = {tnt = true, siege_tnt = true, cannon = true}
+
 	local function getBedNear()
 		local localPosition = entitylib.isAlive and entitylib.character.RootPart.Position or Vector3.zero
 		for _, v in collectionService:GetTagged('bed') do
@@ -7044,53 +7235,142 @@ run(function()
 			end
 		end
 	end
-	
+
 	local function getBlocks()
 		local blocks = {}
 		for _, item in store.inventory.inventory.items do
-			local block = bedwars.ItemMeta[item.itemType].block
-			if block then
-				table.insert(blocks, {item.itemType, block.health})
+			local meta = bedwars.ItemMeta[item.itemType]
+			local block = meta and meta.block
+			if block and not SKIP_BLOCKS[item.itemType] then
+				table.insert(blocks, {item.itemType, block.health or 0})
 			end
 		end
-		table.sort(blocks, function(a, b) 
+		table.sort(blocks, function(a, b)
 			return a[2] > b[2]
 		end)
 		return blocks
 	end
-	
-	local function getPyramid(size, grid)
-		local positions = {}
-		for h = size, 0, -1 do
-			for w = h, 0, -1 do
-				table.insert(positions, Vector3.new(w, (size - h), ((h + 1) - w)) * grid)
-				table.insert(positions, Vector3.new(w * -1, (size - h), ((h + 1) - w)) * grid)
-				table.insert(positions, Vector3.new(w, (size - h), (h - w) * -1) * grid)
-				table.insert(positions, Vector3.new(w * -1, (size - h), (h - w) * -1) * grid)
+
+	--[[ Every grid cell the bed occupies -- both of them.
+
+	The old wall was a pyramid centred on bed.Position, which is ONE cell: the bed's origin.
+	A bed is two cells long (the beds block handler turns the second one with the bed's
+	rotation), so the half that is not the origin sat at the edge of the shape with its end
+	and part of its top left open. That is the uncovered end in the screenshot. The game's own
+	handler says which cells a bed holds, so the defense is built around exactly those. ]]
+	local function getBedCells(bed)
+		local cells
+		pcall(function()
+			local handler = bedwars.BlockController:getHandlerRegistry():getHandler(bed.Name)
+			cells = handler and handler:getContainedPositions(bed)
+		end)
+		if not cells or #cells == 0 then
+			cells = {bedwars.BlockController:getBlockPosition(bed.Position)}
+		end
+		return cells
+	end
+
+	--[[ Layer `layer` of the shell: every cell exactly that many steps (up or sideways, never
+	down) from the NEAREST bed cell. Layer 1 is the blocks touching the bed -- its sides and
+	its top -- and each layer after it covers every face of the one inside, corners included,
+	so no layer leaves a gap for the next to miss.
+
+	Sorted bottom-up, so every block goes in with something under or beside it to sit on. ]]
+	local function getLayer(cells, layer)
+		local isBed, seen, positions = {}, {}, {}
+		for _, cell in cells do
+			isBed[tostring(cell)] = true
+		end
+
+		for _, origin in cells do
+			for dy = 0, layer do
+				local flat = layer - dy
+				for dx = -flat, flat do
+					local dz = flat - math.abs(dx)
+					for _, sz in (dz == 0 and {0} or {dz, -dz}) do
+						local cell = origin + Vector3.new(dx, dy, sz)
+						local key = tostring(cell)
+						if not seen[key] and not isBed[key] then
+							seen[key] = true
+							local nearest = math.huge
+							for _, other in cells do
+								local d = cell - other
+								if d.Y >= 0 then
+									nearest = math.min(nearest, math.abs(d.X) + d.Y + math.abs(d.Z))
+								end
+							end
+							if nearest == layer then
+								table.insert(positions, cell)
+							end
+						end
+					end
+				end
 			end
 		end
+
+		table.sort(positions, function(a, b)
+			if a.Y ~= b.Y then return a.Y < b.Y end
+			if a.X ~= b.X then return a.X < b.X end
+			return a.Z < b.Z
+		end)
 		return positions
 	end
-	
+
+	--[[ The block for a cell in `layer`: that layer's own type while it lasts, then whatever is
+	left. Each type used to own exactly one layer, so a stack running out part way through left
+	the rest of that layer empty even with other blocks still in the inventory. ]]
+	local function pickBlock(blocks, layer)
+		for i = math.min(layer, #blocks), #blocks do
+			if getItem(blocks[i][1]) then return blocks[i][1] end
+		end
+		for i = math.min(layer, #blocks) - 1, 1, -1 do
+			if getItem(blocks[i][1]) then return blocks[i][1] end
+		end
+	end
+
 	BedProtector = vape.Categories.World:CreateModule({
 		Name = 'BedProtector',
 		Function = function(callback)
 			if callback then
 				local bed = getBedNear()
-				bed = bed and bed.Position or nil
-				if bed then
-					for i, block in getBlocks() do
-						for _, pos in getPyramid(i, 3) do
+				if not bed then
+					notif('BedProtector', 'Unable to locate bed', 5)
+					BedProtector:Toggle()
+					return
+				end
+
+				local blocks = getBlocks()
+				if #blocks == 0 then
+					notif('BedProtector', 'No blocks to build with', 5)
+					BedProtector:Toggle()
+					return
+				end
+
+				local cells = getBedCells(bed)
+
+				--[[ Several passes, because a placement is not a guarantee: the server refuses a
+				block whose support has not landed yet, or one that arrives inside a burst it
+				throttles, and a single sweep left those cells open for good. A pass that finds
+				nothing left to place ends it. ]]
+				for _ = 1, 3 do
+					local attempted = 0
+					for layer = 1, #blocks do
+						if not BedProtector.Enabled then break end
+						for _, cell in getLayer(cells, layer) do
 							if not BedProtector.Enabled then break end
-							if getPlacedBlock(bed + pos) then continue end
-							bedwars.placeBlock(bed + pos, block[1], false)
+							local pos = cell * 3
+							if getPlacedBlock(pos) then continue end
+							local item = pickBlock(blocks, layer)
+							if not item then break end
+							attempted += 1
+							pcall(bedwars.placeBlock, pos, item, false)
 						end
 					end
-					if BedProtector.Enabled then 
-						BedProtector:Toggle() 
-					end
-				else
-					notif('BedProtector', 'Unable to locate bed', 5)
+					if attempted == 0 or not BedProtector.Enabled then break end
+					task.wait(0.3)
+				end
+
+				if BedProtector.Enabled then
 					BedProtector:Toggle()
 				end
 			end
@@ -10750,6 +11030,7 @@ shared.bedwars = {
     cloneref            = cloneref,
     assetfunction       = assetfunction,
     oldSwing            = oldSwing,
+    isLocalAfk          = isLocalAfk,
     updateVelocity      = updateVelocity,
 	_baseGetSpeed       = _baseGetSpeed,
 	namecallGuard       = namecallGuard,
