@@ -1162,8 +1162,20 @@ local function getPositionCandidates(settings, origin, range, partName, now)
 		positionCacheOrder[#positionCacheOrder + 1] = key
 	end
 
-	if cache.Version == positionCacheVersion
-		and cache.ExpiresAt and now < cache.ExpiresAt then
+	-- The list holds everything that was inside CoverageRadius of the origin it was built
+	-- at, so it only answers a query of `range` while neither end can have closed the spare
+	-- margin in between: we may have moved at most half of it, and the short lifetime below
+	-- bounds how far a target can have moved in the other half. Reused for a full second
+	-- with no check on movement, it let a player who closed in quickly stand inside the
+	-- aura's range for most of a second without ever being a candidate.
+	local reusable = cache.Version == positionCacheVersion
+		and cache.ExpiresAt and now < cache.ExpiresAt
+	if reusable and cache.CoverageRadius ~= math.huge then
+		local margin = (cache.CoverageRadius - range) / 2
+		local moved = origin - cache.Origin
+		reusable = margin > 0 and moved:Dot(moved) <= margin * margin
+	end
+	if reusable then
 		countStat('TargetCacheHits')
 		return cache.Entities
 	end
@@ -1186,7 +1198,11 @@ local function getPositionCandidates(settings, origin, range, partName, now)
 		end
 	end
 
-	cache.ExpiresAt = now + 1
+	-- At the smallest margin the coverage formula produces (~6.7 studs, a 13.3 stud range)
+	-- half of it is 3.3 studs, which 0.06s covers for anything slower than ~55 studs/s.
+	cache.Origin = origin
+	cache.CoverageRadius = coverageRadius
+	cache.ExpiresAt = now + (lowEndMode() and 0.12 or 0.06)
 	cache.Version = positionCacheVersion
 	countStat('TargetCacheRefreshes')
 	return candidates
