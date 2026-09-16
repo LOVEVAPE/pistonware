@@ -905,130 +905,36 @@ entitylib.getEntityColor = function(entity)
 	return entity and tostring(entity.TeamColor) ~= 'White' and entity.TeamColor.Color or nil
 end
 
-local raycastFilter = {}
 local raycastFilterVersion = 0
-local raycastFilterBuiltVersion = -1
-local raycastListSize = -1
-local customRaycastCache = setmetatable({}, {__mode = 'k'})
 
 local function markRaycastFilterDirty()
 	raycastFilterVersion += 1
 end
 
-local function rebuildRaycastFilter()
-	local count = 0
-	if gameCamera then
-		count += 1
-		raycastFilter[count] = gameCamera
-	end
-	local character = lplr.Character
-	if character then
-		count += 1
-		raycastFilter[count] = character
-	end
-	for _, entity in entitylib.List do
-		if entity.Targetable and entity.Character then
-			count += 1
-			raycastFilter[count] = entity.Character
-		end
-	end
-	for index = count + 1, #raycastFilter do
-		raycastFilter[index] = nil
-	end
-
-	entitylib.IgnoreObject.FilterDescendantsInstances = raycastFilter
-	raycastFilterBuiltVersion = raycastFilterVersion
-	countStat('RaycastFilterRebuilds')
-end
-
-local function customIgnoreChanged(cache, ignoretable)
-	local count = 0
-	local changed = cache.Count < 0
-	for _, object in ignoretable do
-		count += 1
-		if cache.Values[count] ~= object then
-			changed = true
-		end
-	end
-	if cache.Count ~= count then
-		changed = true
-	end
-	return changed, count
-end
-
-local function getRaycastParams(ignoreobject)
-	local listSize = #entitylib.List
-	if listSize ~= raycastListSize then
-		raycastListSize = listSize
-		markRaycastFilterDirty()
-	end
-	if typeof(ignoreobject) ~= 'table' then
-		if typeof(ignoreobject) == 'Instance' then
-			return ignoreobject
-		end
-		if raycastFilterBuiltVersion ~= raycastFilterVersion then
-			rebuildRaycastFilter()
-		end
-		return entitylib.IgnoreObject
-	end
-
-	local cache = customRaycastCache[ignoreobject]
-	if not cache then
-		cache = {
-			Params = RaycastParams.new(),
-			Filter = {},
-			Values = {},
-			Count = -1,
-			BaseVersion = -1
-		}
-		cache.Params.RespectCanCollide = true
-		customRaycastCache[ignoreobject] = cache
-	end
-
-	local customChanged, customCount = customIgnoreChanged(cache, ignoreobject)
-	if cache.BaseVersion ~= raycastFilterVersion or customChanged then
-		if raycastFilterBuiltVersion ~= raycastFilterVersion then
-			rebuildRaycastFilter()
-		end
-
-		local count = 0
-		for _, object in raycastFilter do
-			count += 1
-			cache.Filter[count] = object
-		end
-		for _, object in ignoreobject do
-			count += 1
-			cache.Filter[count] = object
-		end
-		for index = count + 1, #cache.Filter do
-			cache.Filter[index] = nil
-		end
-		local valueIndex = 0
-		for _, object in ignoreobject do
-			valueIndex += 1
-			cache.Values[valueIndex] = object
-		end
-		for index = customCount + 1, #cache.Values do
-			cache.Values[index] = nil
-		end
-
-		cache.Count = customCount
-		cache.BaseVersion = raycastFilterVersion
-		cache.Params.FilterDescendantsInstances = cache.Filter
-		countStat('RaycastFilterRebuilds')
-	end
-
-	return cache.Params
-end
-
 entitylib.IgnoreObject = RaycastParams.new()
 entitylib.IgnoreObject.RespectCanCollide = true
+entitylib.Raycast = function(origin, direction, params)
+	return workspace:Raycast(origin, direction, params)
+end
 entitylib.Wallcheck = function(origin, position, ignoreobject)
-	profileBegin('Pistonware.RaycastVisibility')
-	countStat('Raycasts')
-	local result = workspace.Raycast(workspace, origin, (position - origin), getRaycastParams(ignoreobject))
-	profileEnd()
-	return result
+	if typeof(ignoreobject) ~= 'Instance' then
+		local ignorelist = {gameCamera, lplr.Character}
+		for _, entity in entitylib.List do
+			if entity.Targetable then
+				table.insert(ignorelist, entity.Character)
+			end
+		end
+
+		if typeof(ignoreobject) == 'table' then
+			for _, obj in ignoreobject do
+				table.insert(ignorelist, obj)
+			end
+		end
+
+		ignoreobject = entitylib.IgnoreObject
+		ignoreobject.FilterDescendantsInstances = ignorelist
+	end
+	return entitylib.Raycast(origin, position - origin, ignoreobject)
 end
 
 entitylib.MarkRaycastFilterDirty = markRaycastFilterDirty
