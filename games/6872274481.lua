@@ -934,10 +934,11 @@ run(function()
 			} or {}
 
 			if hum and humrootpart then
+				local startHealth, startMaxHealth = entitylib.readHealth(char)
 				local entity = {
 					Connections = {},
 					Character = char,
-					Health = (char:GetAttribute('Health') or 100) + getShieldAttribute(char),
+					Health = startHealth,
 					Head = head,
 					Humanoid = hum,
 					HumanoidRootPart = humrootpart,
@@ -946,7 +947,7 @@ run(function()
 					JumpTick = os.clock(),
 					Jumping = false,
 					LandTick = os.clock(),
-					MaxHealth = char:GetAttribute('MaxHealth') or 100,
+					MaxHealth = startMaxHealth,
 					NPC = plr == nil,
 					Player = plr,
 					RootPart = humrootpart,
@@ -964,12 +965,39 @@ run(function()
 				else
 					entity.Targetable = entitylib.targetCheck(entity)
 
+					local function refreshHealth()
+						entity.Health, entity.MaxHealth = entitylib.readHealth(char)
+						entitylib.Events.EntityUpdated:Fire(entity)
+					end
+
 					for _, v in entitylib.getUpdateConnections(entity) do
-						table.insert(entity.Connections, v:Connect(function()
-							entity.Health = (char:GetAttribute('Health') or 100) + getShieldAttribute(char)
-							entity.MaxHealth = char:GetAttribute('MaxHealth') or 100
-							entitylib.Events.EntityUpdated:Fire(entity)
-						end))
+						table.insert(entity.Connections, v:Connect(refreshHealth))
+					end
+
+					--[[ An NPC is built around a stand-in humanoid table (see above), so nothing
+					here was ever listening to its real Humanoid -- and a dummy or monster that keeps
+					its health there, rather than in the Health attribute players carry, never fired
+					a single update: its nametag sat on the number it was built with. Watch the real
+					one, including a Humanoid that is only parented after the entity is. ]]
+					if not plr then
+						local function watchHumanoid(humanoid)
+							table.insert(entity.Connections, humanoid:GetPropertyChangedSignal('Health'):Connect(refreshHealth))
+							table.insert(entity.Connections, humanoid:GetPropertyChangedSignal('MaxHealth'):Connect(refreshHealth))
+							refreshHealth()
+						end
+						local humanoid = char:FindFirstChildOfClass('Humanoid')
+						if humanoid then
+							watchHumanoid(humanoid)
+						else
+							local waiting
+							waiting = char.ChildAdded:Connect(function(child)
+								if child:IsA('Humanoid') then
+									waiting:Disconnect()
+									watchHumanoid(child)
+								end
+							end)
+							table.insert(entity.Connections, waiting)
+						end
 					end
 
 					for _, v in updateobjects do
@@ -1005,6 +1033,20 @@ run(function()
 							end
 						end)
 					end
+					--[[ The build above can yield for seconds (the armor slots wait up to 5s each).
+					A player who leaves -- or a character destroyed -- in that window was still added
+					here, after removeEntity had already run and found nothing to remove, so the
+					entity sat in the list for the rest of the server with a nametag nothing would
+					ever take down. Drop the build instead. ]]
+					if not char.Parent or (plr and plr.Parent == nil) then
+						for _, connection in entity.Connections do
+							pcall(function() connection:Disconnect() end)
+						end
+						table.clear(entity.Connections)
+						entitylib.EntityThreads[char] = nil
+						return
+					end
+
 					table.insert(entitylib.List, entity)
 					entitylib.Events.EntityAdded:Fire(entity)
 				end
@@ -1027,6 +1069,22 @@ run(function()
 		if coroutine.status(builder) ~= 'dead' then
 			entitylib.EntityThreads[char] = builder
 		end
+	end
+
+	--[[ Health and max health for any entity's character, shields folded into health the way
+	players have always been read. Players carry both as attributes; dummies and monsters may
+	only have them on a Humanoid, so that is the fallback rather than a flat 100. ]]
+	entitylib.readHealth = function(char)
+		local health = char:GetAttribute('Health')
+		local maxHealth = char:GetAttribute('MaxHealth')
+		if health == nil or maxHealth == nil then
+			local humanoid = char:FindFirstChildOfClass('Humanoid')
+			if humanoid then
+				health = health or humanoid.Health
+				maxHealth = maxHealth or humanoid.MaxHealth
+			end
+		end
+		return (health or 100) + getShieldAttribute(char), maxHealth or 100
 	end
 
 	entitylib.getUpdateConnections = function(ent)
@@ -3638,16 +3696,61 @@ run(function()
 		end
 	end
 	
+	-- Air Hit Chance: while you are off the ground only this share of swings get the extra
+	-- range. attackEntity re-checks the target against RAYCAST_SWORD_CHARACTER_DISTANCE
+	-- (sword-controller), so a failed roll runs that one call against the original distance
+	-- and an out-of-range hit is dropped. swingSwordAtMouse is left alone on purpose --
+	-- other modules debug.setconstant it, which a wrapper would break.
+	local AirChance
+	local oldAttackEntity, attackEntityHook
+	local airRand = Random.new()
+
+	local function isAirborne()
+		local hum = entitylib.isAlive and entitylib.character.Humanoid
+		return hum ~= nil and hum.FloorMaterial == Enum.Material.Air
+	end
+
+	local function hookAttackEntity()
+		if oldAttackEntity then return end
+		local original = bedwars.SwordController.attackEntity
+		oldAttackEntity = original
+		attackEntityHook = function(self, ...)
+			if AirChance.Value < 100 and isAirborne() and airRand:NextNumber(0, 100) > AirChance.Value then
+				bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = originalSwordReach or 14.4
+				local results = table.pack(pcall(original, self, ...))
+				-- read the module state again rather than restoring a saved value, in case
+				-- the call yielded and Reach was turned off or re-ranged in the meantime
+				bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = Reach.Enabled and Value.Value + 2 or originalSwordReach or 14.4
+				if not results[1] then
+					error(results[2], 0)
+				end
+				return table.unpack(results, 2, results.n)
+			end
+			return original(self, ...)
+		end
+		bedwars.SwordController.attackEntity = attackEntityHook
+	end
+
+	local function unhookAttackEntity()
+		if not oldAttackEntity then return end
+		if bedwars.SwordController.attackEntity == attackEntityHook then
+			bedwars.SwordController.attackEntity = oldAttackEntity
+		end
+		oldAttackEntity, attackEntityHook = nil, nil
+	end
+
 	Reach = vape.Categories.Combat:CreateModule({
 		Name = 'Reach',
 		Function = function(callback)
 			if callback then
 				originalSwordReach = originalSwordReach or bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE
 				bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = Value.Value + 2
+				hookAttackEntity()
 				if PlaceBlocks and PlaceBlocks.Enabled then
 					startPlaceReach()
 				end
 			else
+				unhookAttackEntity()
 				bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = originalSwordReach or 14.4
 				stopPlaceReach()
 			end
@@ -3667,6 +3770,14 @@ run(function()
 		Suffix = function(val)
 			return val == 1 and 'stud' or 'studs'
 		end
+	})
+	AirChance = Reach:CreateSlider({
+		Name = 'Air Hit Chance',
+		Min = 0,
+		Max = 100,
+		Default = 100,
+		Suffix = function(val) return '%' end,
+		Tooltip = 'How often a swing gets the extra range while you are in the air'
 	})
 	PlaceBlocks = Reach:CreateToggle({
 		Name = 'Place Blocks',
@@ -3956,26 +4067,36 @@ run(function()
 	local Vertical
 	local Chance
 	local TargetCheck
+	local AFKCheck
 	local rand, old = Random.new()
-	
+
 	Velocity = vape.Categories.Combat:CreateModule({
 		Name = 'Velocity',
 		Function = function(callback)
 			if callback then
 				old = bedwars.KnockbackUtil.applyKnockback
 				bedwars.KnockbackUtil.applyKnockback = function(root, mass, dir, knockback, ...)
-					if rand:NextNumber(0, 100) > Chance.Value then return end
+					-- A failed Chance roll (or being AFK) leaves this hit alone. This used to
+					-- `return` here, which skipped applyKnockback altogether -- so every
+					-- missed roll took off ALL of the knockback instead of none of it.
+					if rand:NextNumber(0, 100) > Chance.Value or (AFKCheck.Enabled and isLocalAfk()) then
+						return old(root, mass, dir, knockback, ...)
+					end
 					local check = (not TargetCheck.Enabled) or entitylib.EntityPosition({
 						Range = 50,
 						Part = 'RootPart',
 						Players = true
 					})
-	
+
 					if check then
-						knockback = knockback or {}
 						if Horizontal.Value == 0 and Vertical.Value == 0 then return end
-						knockback.horizontal = (knockback.horizontal or 1) * (Horizontal.Value / 100)
-						knockback.vertical = (knockback.vertical or 1) * (Vertical.Value / 100)
+						-- scale a copy: the table is the one EntityDamageEvent handed the
+						-- knockback-controller, and writing into it (or erroring on it) is
+						-- what can drop the whole hit
+						local scaled = knockback and table.clone(knockback) or {}
+						scaled.horizontal = (scaled.horizontal or 1) * (Horizontal.Value / 100)
+						scaled.vertical = (scaled.vertical or 1) * (Vertical.Value / 100)
+						knockback = scaled
 					end
 					
 					return old(root, mass, dir, knockback, ...)
@@ -4008,6 +4129,10 @@ run(function()
 		Suffix = function(val) return '%' end
 	})
 	TargetCheck = Velocity:CreateToggle({Name = 'Only when targeting'})
+	AFKCheck = Velocity:CreateToggle({
+		Name = 'AFK check',
+		Tooltip = 'Takes full knockback once you have not touched your mouse or keyboard for 30 seconds'
+	})
 end)
 
 --[[
@@ -5959,10 +6084,44 @@ run(function()
 				Only filters itself and skips anyone tagged or mid-build, so this only ever fills
 				a gap: an entity deliberately left untagged stays untagged. ]]
 				local sweepAt = 0
+				local npcPollAt = 0
 				NameTags:Clean(runService.Heartbeat:Connect(function()
 					local now = os.clock()
+
+					--[[ NPC health, polled as well as listened for. Whatever a dummy or monster
+					keeps its health in, a change that fires no signal still reaches the tag within
+					a fifth of a second. Only tagged NPCs are read, and only a real change redraws. ]]
+					if now >= npcPollAt then
+						npcPollAt = now + 0.2
+						for ent in Reference do
+							if ent.NPC and ent.Character and ent.Character.Parent then
+								local ok, health, maxHealth = pcall(entitylib.readHealth, ent.Character)
+								if ok and (health ~= ent.Health or maxHealth ~= ent.MaxHealth) then
+									ent.Health, ent.MaxHealth = health, maxHealth
+									refreshTag(ent)
+								end
+							end
+						end
+					end
+
 					if now < sweepAt then return end
 					sweepAt = now + 1
+
+					--[[ A tag whose player has left the server, or whose character no longer
+					exists, is taken down here. EntityRemoved is what normally does it, and this is
+					the backstop for anything that slipped past it -- a player gone mid-build, a
+					character destroyed without CharacterRemoving. ]]
+					local remove = Removed[methodused]
+					if remove then
+						for ent in Reference do
+							local gone = (ent.Player and ent.Player.Parent == nil)
+								or not (ent.Character and ent.Character.Parent)
+							if gone then
+								remove(ent)
+							end
+						end
+					end
+
 					local add = Added[methodused]
 					if not add then return end
 					for _, ent in entitylib.List do
