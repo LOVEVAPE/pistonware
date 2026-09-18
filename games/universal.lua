@@ -1508,7 +1508,7 @@ run(function()
 		ExtraText = function()
 			return Method.Value:gsub('FindPartOnRay', '')
 		end,
-		Tooltip = 'Silently adjusts your aim towards the enemy'
+		Tooltip = 'Redirects your shots onto a target without moving your camera'
 	})
 	Target = SilentAim:CreateTargets({Players = true})
 	Mode = SilentAim:CreateDropdown({
@@ -1844,7 +1844,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Help\'s you with your Parkinson\'s\nPrevents you from falling into the void.'
+		Tooltip = 'Catches you before you fall into the void.'
 	})
 	Method = AntiFall:CreateDropdown({
 		Name = 'Method',
@@ -2100,7 +2100,7 @@ run(function()
 		ExtraText = function()
 			return Mode.Value
 		end,
-		Tooltip = 'Makes you go zoom.'
+		Tooltip = 'Moves you faster than your walk speed allows'
 	})
 	Mode = Fly:CreateDropdown({
 		Name = 'Speed Mode',
@@ -2941,7 +2941,7 @@ run(function()
 		ExtraText = function()
 			return Mode.Value
 		end,
-		Tooltip = 'Lets you jump farther'
+		Tooltip = 'Throws your jumps further than normal'
 	})
 	Mode = LongJump:CreateDropdown({
 		Name = 'Mode',
@@ -3291,7 +3291,7 @@ run(function()
 		ExtraText = function()
 			return Mode.Value
 		end,
-		Tooltip = 'Increases your movement with various methods.'
+		Tooltip = 'Moves you faster, with a choice of methods.'
 	})
 	Mode = Speed:CreateDropdown({
 		Name = 'Mode',
@@ -4968,7 +4968,7 @@ run(function()
 				until not Health.Enabled
 			end
 		end,
-		Tooltip = 'Displays your health in the center of your screen.'
+		Tooltip = 'Shows your health as a number in the middle of the screen.'
 	})
 end)
 	
@@ -5262,7 +5262,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Renders nametags on entities through walls.'
+		Tooltip = 'Draws names over players and mobs, visible through walls.'
 	})
 	Targets = NameTags:CreateTargets({
 		Players = true,
@@ -5737,19 +5737,23 @@ run(function()
 		end
 	end
 
-	vape:Clean(workspace.DescendantAdded:Connect(addCandidate))
-	vape:Clean(workspace.DescendantRemoving:Connect(function(v)
-		Candidates[v] = nil
-		if Reference[v] then
-			Reference[v]:Destroy()
-			Reference[v] = nil
-		end
-	end))
-
+	--[[ Watched only while Search is on. These two used to be connected for the whole session
+	whether or not Search was ever enabled, so every instance the game added to or removed from
+	the workspace -- each block, projectile, particle and effect -- ran through here, and every
+	part and model was kept in Candidates, for a module almost nobody has on. The candidate list
+	is rebuilt from the workspace each time Search turns on instead. ]]
 	Search = vape.Categories.Render:CreateModule({
 		Name = 'Search',
 		Function = function(callback)
 			if callback then
+				Search:Clean(workspace.DescendantAdded:Connect(addCandidate))
+				Search:Clean(workspace.DescendantRemoving:Connect(function(v)
+					Candidates[v] = nil
+					if Reference[v] then
+						Reference[v]:Destroy()
+						Reference[v] = nil
+					end
+				end))
 				if not CandidatesInitialized then
 					for _, v in workspace:GetDescendants() do
 						addCandidate(v)
@@ -5762,6 +5766,10 @@ run(function()
 			else
 			Folder:ClearAllChildren()
 			table.clear(Reference)
+			--[[ Nothing tracks the workspace while off, so the list would go stale; the next
+			enable walks it again. ]]
+			table.clear(Candidates)
+			CandidatesInitialized = false
 		end
 		end,
 		Tooltip = 'Draws box around selected parts\nAdd parts in Search frame'
@@ -7259,7 +7267,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Detects people with a staff rank ingame'
+		Tooltip = 'Warns you when someone with a staff rank is in your server'
 	})
 	Mode = StaffDetector:CreateDropdown({
 		Name = 'Mode',
@@ -7308,7 +7316,7 @@ run(function()
 				table.clear(connections)
 			end
 		end,
-		Tooltip = 'Lets you stay ingame without getting kicked'
+		Tooltip = 'Keeps you from being kicked for being idle'
 	})
 end)
 	
@@ -8322,7 +8330,7 @@ run(function()
 				gameCamera.FieldOfView = oldfov
 			end
 		end,
-		Tooltip = 'Adjusts camera vision'
+		Tooltip = 'Changes how wide your camera sees'
 	})
 	Value = FOV:CreateSlider({
 		Name = 'FOV',
@@ -8700,7 +8708,7 @@ run(function()
 				table.clear(alreadypicked)
 			end
 		end,
-		Tooltip = 'Built in mp3 player'
+		Tooltip = 'Plays your own music files while you play'
 	})
 	List = SongBeats:CreateTextList({
 		Name = 'Songs',

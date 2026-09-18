@@ -1792,13 +1792,45 @@ function vape:LoadGUI()
 	local scarcitybanner = Instance.new('TextLabel')
 	scarcitybanner.BackgroundTransparency = 1
 	scarcitybanner.FontFace = uipallet.Font
-	scarcitybanner.Position = UDim2.fromScale(0, 0.97)
-	scarcitybanner.Size = UDim2.fromScale(1, 0.02)
+	scarcitybanner.Position = UDim2.fromScale(0, 0.962)
+	scarcitybanner.Size = UDim2.fromScale(1, 0.028)
 	scarcitybanner.Text = 'The discord link has been fixed, click the discord icon to join.'
 	scarcitybanner.TextColor3 = Color3.new(1, 1, 1)
 	scarcitybanner.TextScaled = true
 	scarcitybanner.TextStrokeTransparency = 0.5
 	scarcitybanner.Parent = clickgui
+	-- Time left on the key, from the expiry the loader stored. Developer runs count as lifetime;
+	-- keeps the discord line when an older loader stored nothing.
+	local function keyDuration()
+		local expire = tonumber(shared.PistonwareKeyExpire)
+		if not expire and shared.PistonwareDeveloper then expire = -1 end
+		if not expire then return nil end
+		local prefix = 'Thank you for choosing Pistonware. Remaining Key Duration: '
+		if expire < 0 then return 'Thank you for choosing Pistonware.' end
+		local left = math.max(expire - os.time(), 0)
+		if left == 0 then return 'Thank you for choosing Pistonware. Your key has expired.' end
+		local function unit(n, word)
+			return n..' '..word..(n == 1 and '' or 's')
+		end
+		local days, hours, minutes = left // 86400, left % 86400 // 3600, left % 3600 // 60
+		local parts = {}
+		if days > 0 then table.insert(parts, unit(days, 'day')) end
+		if hours > 0 then table.insert(parts, unit(hours, 'hour')) end
+		if days == 0 and (minutes > 0 or hours == 0) then table.insert(parts, unit(math.max(minutes, 1), 'minute')) end
+		return prefix..table.concat(parts, ', ')
+	end
+	local function refreshDuration()
+		local text = keyDuration()
+		if text then scarcitybanner.Text = text end
+	end
+	refreshDuration()
+	clickgui:GetPropertyChangedSignal('Visible'):Connect(refreshDuration)
+	task.spawn(function()
+		while scarcitybanner.Parent do
+			task.wait(30)
+			if clickgui.Visible then refreshDuration() end
+		end
+	end)
 	local modal = Instance.new('TextButton')
 	modal.BackgroundTransparency = 1
 	modal.Modal = true

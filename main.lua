@@ -138,11 +138,28 @@ local loadstring = function(...)
 	end
 	return res
 end
+--[[ Chunks hasContent already compiled, handed to the next loadstring of the same source under
+the same name instead of being compiled a second time. hasContent compiles every cached .lua
+to prove it is intact, and the caller then compiled the identical text again to run it -- for
+the GUI, universal.lua and the game file that is ~1.4MB of source compiled twice on the game
+thread, every inject. Consumed on use, so each entry lives from the check to the run. ]]
+local validatedChunks = {}
+local function takeValidatedChunk(source, name)
+	for path, entry in validatedChunks do
+		if entry.body == source and entry.name == name then
+			validatedChunks[path] = nil
+			return entry.chunk
+		end
+	end
+	return nil
+end
+
 local function runChunk(source, name)
-	local chunk = loadstring(source, name)
+	local chunk = takeValidatedChunk(source, name) or loadstring(source, name)
 	return chunk and chunk()
 end
-local queue_on_teleport = queue_on_teleport or syn and syn.queue_on_teleport
+local queue_on_teleport = queue_on_teleport or queueonteleport
+	or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
 local hasQueueOnTeleport = queue_on_teleport ~= nil
 queue_on_teleport = queue_on_teleport or function() end
 local isfile = isfile or function(file)
@@ -268,24 +285,31 @@ that means a chunk that never loads. Every route that could have fixed it asked 
 told the file was fine, which is why the only known remedy was reinstalling the whole script.
 
 Treating empty as missing makes it repair itself on the next run instead. ]]
-local function hasContent(path)
+local function hasContent(path, chunkName)
 	if not isfile(path) then return false end
 	local ok, body = pcall(readfile, path)
 	if not ok or type(body) ~= 'string' or body == '' then return false end
 	if path:match('%.lua$') then
-		local compileOk, chunk = pcall(loadstring, body, path)
-		return compileOk and type(chunk) == 'function'
+		--[[ Compiled under the name the file will run as, so the chunk can be kept for that run
+		(see validatedChunks) with its error traces unchanged. ]]
+		local name = chunkName or path
+		local compileOk, chunk = pcall(loadstring, body, name)
+		local valid = compileOk and type(chunk) == 'function'
+		if valid and chunkName then
+			validatedChunks[path] = {body = body, name = name, chunk = chunk}
+		end
+		return valid
 	end
 	return true
 end
 
-local function downloadFile(path, func)
+local function downloadFile(path, func, chunkName)
 	local devLoader = shared.PistonwareDevLoadSource
 	if type(devLoader) == 'function' then
 		local body = devLoader(path)
 		return func and func(path) or body
 	end
-	if not (cacheAllowed() and hasContent(path)) then
+	if not (cacheAllowed() and hasContent(path, chunkName)) then
 		--[[ bedwars.lua only exists in the GitLab repo (kept separate/obfuscated there), at that
 		repo's ROOT even though it caches locally under games/; everything else lives in the
 		GitHub repo. ]]
@@ -513,6 +537,19 @@ local function finishLoading()
 						-- that seam in the new Roblox execution context and the local payload reports
 						-- an authorization failure even though the original boot was valid.
 						if rawget(shared, 'PistonwareDeveloper') == true then
+							-- Each step leaves a line in pistonware_teleport.log: nothing else is
+							-- up yet on the new server to report where a queued boot stopped.
+							local function crumb(text)
+								pcall(function()
+									local line = os.date('!%Y-%m-%dT%H:%M:%SZ')..' [main.lua] '..text..'\n'
+									if type(appendfile) == 'function' and isfile('pistonware_teleport.log') then
+										appendfile('pistonware_teleport.log', line)
+									else
+										writefile('pistonware_teleport.log', line)
+									end
+								end)
+							end
+							crumb('queued script started in place '..tostring(game.PlaceId))
 							pcall(rawset, shared, 'PistonwareSessionRejected', nil)
 							pcall(rawset, shared, 'PistonwareLoaderBoot', nil)
 							local developerSource
@@ -524,11 +561,22 @@ local function finishLoading()
 							if type(developerSource) == 'string' and developerSource ~= '' then
 								local developerChunk, developerError = loadstring(developerSource, 'loaderdev')
 								if developerChunk then
-									return developerChunk()
+									local ran, runError = pcall(developerChunk)
+									crumb(ran and 'loaderdev.lua finished' or ('loaderdev.lua errored: '..tostring(runError)))
+									-- A boot that died cannot claim AutoQueueDodge's hold, so let the match in
+									-- now instead of after the three-minute backstop.
+									local hold = shared.PistonwareDodgeHold
+									if not ran and type(hold) == 'table' and not hold.claimed and type(hold.release) == 'function' then
+										pcall(hold.release)
+										crumb('released the AutoQueueDodge hold')
+									end
+									return
 								end
+								crumb('loaderdev.lua did not compile: '..tostring(developerError))
 								queuedError('teleport.loaderdev.compile', developerError)
 								return
 							else
+								crumb('loaderdev.lua could not be read')
 								queuedError('teleport.loaderdev.missing', 'queued developer loader is unavailable; refusing to continue')
 								return
 							end
@@ -597,6 +645,389 @@ local function finishLoading()
 			-- queueing before the payload has finished means vape.Profile is not set yet, and
 			-- without this the next server would be told to load 'default'.
 			teleportScript = 'shared.VapeCustomProfile = '..string.format('%q', vape.Profile or customProfile or 'default')..'\n'..teleportScript
+			--[[ AutoQueueDodge, FIRST in the script. Loading into a match is the game's
+			ConnectController.KnitStart sending PlayerConnect, and it runs as soon as Knit starts, long
+			before the loader or anything behind it. So the check lives here: it holds the connect,
+			judges the teams against the settings the module saved, and lets you in when they pass.
+			pistonware loads alongside it, so its notifications report what is happening and the
+			module's Load in now button can let you in early.
+
+			Only acts in a ranked BedWars match, and only while autoqueuedodge.txt says the module is on. ]]
+			teleportScript = [==[
+local previousHold = shared.PistonwareDodgeHold
+if game.PlaceId == 6872274481 and not (type(previousHold) == 'table' and previousHold.jobId == game.JobId) then
+	-- Written by the AutoQueueDodge module while it is on, deleted when it is off. No file,
+	-- or a module that is off, means this match loads exactly as it always has.
+	local settings
+	pcall(function()
+		if isfile('pistonware/autoqueuedodge.txt') then
+			settings = game:GetService('HttpService'):JSONDecode(readfile('pistonware/autoqueuedodge.txt'))
+		end
+	end)
+	if type(settings) == 'table' and settings.enabled == true then
+		local hold = {state = 'waiting', jobId = game.JobId}
+		shared.PistonwareDodgeHold = hold
+
+		-- Pistonware's own notifications. pistonware keeps loading while the match is held,
+		-- but its GUI is not up for the first few seconds, so anything said before then waits
+		-- and goes out in order once it is. A vape left in shared by the previous server is
+		-- not ours to use.
+		local staleVape = shared.vape
+		local outbox = {}
+		local flushing = false
+		local function notify(text, duration, kind)
+			-- The module's Notify toggle. Missing from settings written before it existed: on.
+			if settings.notify == false then return end
+			table.insert(outbox, {text, duration or 6, kind})
+			if flushing then return end
+			flushing = true
+			task.spawn(function()
+				local deadline = os.clock() + 180
+				while #outbox > 0 and os.clock() < deadline do
+					local vape = shared.vape
+					if type(vape) == 'table' and vape ~= staleVape and type(vape.CreateNotification) == 'function' then
+						local entry = table.remove(outbox, 1)
+						pcall(function()
+							vape:CreateNotification('AutoQueueDodge', entry[1], entry[2], entry[3])
+						end)
+					else
+						task.wait(0.25)
+					end
+				end
+				flushing = false
+			end)
+		end
+
+		task.spawn(function()
+			local ok, err = pcall(function()
+				repeat task.wait() until game:IsLoaded()
+				local players = game:GetService('Players')
+				local lplr = players.LocalPlayer
+				local replicated = game:GetService('ReplicatedStorage')
+				local scripts = lplr:WaitForChild('PlayerScripts')
+
+				local controller
+				local deadline = os.clock() + 30
+				repeat
+					pcall(function()
+						controller = require(scripts:WaitForChild('TS').controllers.global.connect['connect-controller']).ConnectController
+					end)
+					if not controller then task.wait() end
+				until controller or os.clock() > deadline
+				if not controller then
+					hold.state = 'failed'
+					notify('Could not hold this match, loading in normally.', 6, 'warning')
+					return
+				end
+				if controller.connected then
+					hold.state = 'missed'
+					notify('You loaded in before this match could be held.', 6, 'warning')
+					return
+				end
+
+				-- Ranked only. The teleport data names the queue, and every ranked queue's meta
+				-- carries a rankCategory. Anything else, or a queue that cannot be read, loads
+				-- normally without being held at all.
+				local queueMeta = require(replicated.TS.game['queue-meta']).QueueMeta
+				local teleportData
+				pcall(function()
+					teleportData = game:GetService('TeleportService'):GetLocalPlayerTeleportData()
+				end)
+				local queueType = type(teleportData) == 'table' and type(teleportData.match) == 'table' and teleportData.match.queueType
+				local meta = queueType and queueMeta[queueType]
+				if not (meta and (meta.rankCategory ~= nil or tostring(queueType):find('ranked', 1, true))) then
+					hold.state = 'skipped'
+					return
+				end
+				if type(meta.teams) ~= 'table' then
+					hold.state = 'failed'
+					return
+				end
+
+				local original = controller.KnitStart
+				controller.KnitStart = function() end
+				hold.controller = controller
+				hold.release = function()
+					if hold.state ~= 'held' then return false end
+					hold.state = 'released'
+					controller.KnitStart = original
+					task.spawn(function() pcall(original, controller) end)
+					return true
+				end
+				hold.state = 'held'
+
+				local remotes = require(replicated:WaitForChild('TS'):WaitForChild('remotes')).default
+
+				local TIER_NAMES = {'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Emerald', 'Nightmare'}
+				local rankCache, asked = {}, {}
+
+				local function tierOf(plr)
+					local division = rankCache[plr.UserId]
+					return type(division) == 'number' and division // 4 or nil
+				end
+
+				local function tierName(tier)
+					return tier and TIER_NAMES[tier + 1] or 'Unranked'
+				end
+
+				local function deviceOf(plr)
+					local input = plr:GetAttribute('UserInputType')
+					if input == nil then return nil end
+					if type(input) == 'number' then
+						if input == 7 then return 'mobile' end
+						if input >= 9 and input <= 16 then return 'gamepad' end
+						return 'pc'
+					end
+					local name = tostring(input):lower()
+					if name:find('gamepad') or name:find('console') or name:find('xbox') or name:find('playstation') then
+						return 'gamepad'
+					end
+					if name:find('touch') or name:find('mobile') or name:find('phone') or name:find('tablet') then
+						return 'mobile'
+					end
+					return 'pc'
+				end
+
+				local function fetchRanks(list)
+					local ids = {}
+					for _, plr in list do
+						if not asked[plr.UserId] then
+							table.insert(ids, plr.UserId)
+						end
+					end
+					if #ids == 0 then return true end
+					local called, success, result = pcall(function()
+						return remotes.Client:Get('FetchRanks'):CallServerAsync(ids):await()
+					end)
+					if not (called and success and type(result) == 'table') then return false end
+					for _, id in ids do
+						asked[id] = true
+					end
+					for _, data in result do
+						if type(data) == 'table' and data.userId then
+							rankCache[data.userId] = data.rankDivision
+						end
+					end
+					return true
+				end
+
+				local function snapshot(teams)
+					local sides = {}
+					for _, team in teams do
+						table.insert(sides, {
+							id = tostring(team.id),
+							name = tostring(team.displayName or ''):lower(),
+							size = tonumber(team.maxPlayers) or 5,
+							players = {}
+						})
+					end
+					local pending = 0
+					for _, plr in players:GetPlayers() do
+						if plr ~= lplr then
+							local attribute = plr:GetAttribute('Team')
+							local teamName = plr.Team and plr.Team.Name:lower()
+							local side
+							for _, candidate in sides do
+								if (attribute ~= nil and tostring(attribute) == candidate.id)
+									or (teamName and candidate.name ~= '' and teamName:find(candidate.name, 1, true)) then
+									side = candidate
+									break
+								end
+							end
+							if side then
+								table.insert(side.players, plr)
+							else
+								pending += 1
+							end
+						end
+					end
+					return sides, pending
+				end
+
+				local function withMe(list)
+					local copy = table.clone(list)
+					table.insert(copy, lplr)
+					return copy
+				end
+
+				local function bestTier(list)
+					local best
+					for _, plr in list do
+						local tier = tierOf(plr)
+						if tier and (not best or tier > best) then
+							best = tier
+						end
+					end
+					return best
+				end
+
+				local function countAbove(list, others)
+					local best = bestTier(others)
+					local count = 0
+					for _, plr in list do
+						local tier = tierOf(plr)
+						if tier and (not best or tier > best) then
+							count += 1
+						end
+					end
+					return count
+				end
+
+				local function vetoReason(enemy, mine)
+					if not settings.rankVeto then return nil end
+					local above = countAbove(enemy, mine)
+					if above >= (settings.vetoCount or 2) then
+						return ('%d of them outrank your best (%s)'):format(above, tierName(bestTier(mine)))
+					end
+					return nil
+				end
+
+				local function matchReason(enemy, mine)
+					if settings.rankAdvantage then
+						local above = countAbove(mine, enemy)
+						if above >= (settings.advantageCount or 3) then
+							return ('%d of your team outrank their best'):format(above)
+						end
+					end
+					if settings.weakDevices then
+						local gamepads, mobiles = 0, 0
+						for _, plr in enemy do
+							local device = deviceOf(plr)
+							if device == 'gamepad' then
+								gamepads += 1
+							elseif device == 'mobile' then
+								mobiles += 1
+							end
+						end
+						if gamepads >= (settings.gamepadCount or 2) then
+							return ('%d gamepad players against you'):format(gamepads)
+						elseif mobiles >= (settings.mobileCount or 3) then
+							return ('%d mobile players against you'):format(mobiles)
+						elseif settings.mixedDevices and gamepads >= 1 and mobiles >= 1 then
+							return 'a mobile and a gamepad player against you'
+						end
+					end
+					if settings.lowRank then
+						local limit = (table.find(TIER_NAMES, settings.lowRankTier) or 3) - 1
+						for _, plr in enemy do
+							local tier = tierOf(plr)
+							if tier and tier <= limit then
+								return ('a %s player against you'):format(tierName(tier))
+							end
+						end
+					end
+					return nil
+				end
+
+				-- 'load', 'dodge', or nil to keep waiting, plus the reason. You join the smaller
+				-- team, so yours is only known once the teams are uneven; with even teams you are
+				-- the extra player on either side, and the veto has to pass against both.
+				local function decide(teams, waitedOut)
+					local sides, pending = snapshot(teams)
+					if #sides ~= 2 then
+						return 'load', 'this is not a two-team queue'
+					end
+					local a, b = sides[1], sides[2]
+					local small, large = a, b
+					if #a.players > #b.players then
+						small, large = b, a
+					end
+					if #small.players >= small.size then
+						return 'dodge', 'both teams are already full'
+					end
+
+					local oneFull = #large.players >= large.size
+						and (#small.players + 1 >= small.size or pending == 0)
+					local bothShort = pending == 0
+						and #a.players == a.size - 1 and #b.players == b.size - 1
+					if not (oneFull or bothShort or waitedOut) then
+						return nil, ('%d v %d, %d still loading in'):format(#a.players, #b.players, pending)
+					end
+
+					local everyone = withMe(a.players)
+					for _, plr in b.players do
+						table.insert(everyone, plr)
+					end
+					if not fetchRanks(everyone) then
+						return nil, 'looking up ranks'
+					end
+
+					if #small.players == #large.players then
+						local count = #small.players
+						local veto = vetoReason(a.players, withMe(b.players)) or vetoReason(b.players, withMe(a.players))
+						if veto then
+							return 'dodge', veto
+						end
+						if not settings.advanced or settings.extraPlayer then
+							return 'load', ('%dv%d on either team'):format(count + 1, count)
+						end
+						local first = matchReason(a.players, withMe(b.players))
+						local second = matchReason(b.players, withMe(a.players))
+						if first and second then
+							return 'load', first
+						end
+						return 'dodge', 'no advanced rule matches against both teams'
+					end
+
+					if settings.outnumbered ~= false and #small.players + 1 < #large.players then
+						return 'dodge', ('you would be in a %dv%d'):format(#small.players + 1, #large.players)
+					end
+					local mine = withMe(small.players)
+					local veto = vetoReason(large.players, mine)
+					if veto then
+						return 'dodge', veto
+					end
+					-- Basic mode only screens out bad matches; Advanced also asks for a reason to load.
+					if not settings.advanced then
+						return 'load', 'the teams pass your checks'
+					end
+					local reason = matchReason(large.players, mine)
+					if reason then
+						return 'load', reason
+					end
+					return 'dodge', 'no advanced rule matches this lobby'
+				end
+
+				local started = os.clock()
+				local lastReason, lastWaitNotice = nil, 0
+				while hold.state == 'held' do
+					if controller.connected then
+						hold.state = 'missed'
+						notify('You loaded in before this match could be held.', 6, 'warning')
+						break
+					end
+					local verdict, reason = decide(meta.teams, os.clock() - started >= (settings.maxWait or 30))
+					if verdict == 'load' then
+						if hold.release() then
+							notify('Loading in: '..reason..'.', 8)
+						end
+						break
+					elseif verdict == 'dodge' then
+						if reason ~= lastReason then
+							lastReason = reason
+							notify('Not loading: '..reason..'.\nLeave to requeue, or press Load in now in the module.', 15, 'warning')
+						end
+					elseif os.clock() - lastWaitNotice >= 6 then
+						lastReason = nil
+						lastWaitNotice = os.clock()
+						notify('Waiting: '..reason..'.', 5)
+					end
+					task.wait(0.5)
+				end
+			end)
+			if not ok then
+				-- Never strand anyone on an error in here: let the match in.
+				if hold.state == 'held' and hold.release then
+					hold.release()
+				elseif hold.state == 'waiting' then
+					hold.state = 'failed'
+				end
+				notify('Stopped checking this match ('..tostring(err)..'), loading you in.', 10, 'alert')
+			end
+		end)
+	end
+end
+]==]..teleportScript
 			--[[
 				Queue FIRST, and guard everything after it.
 
@@ -614,7 +1045,12 @@ local function finishLoading()
 
 				Queueing first ensures that later save failures do not prevent re-injection.
 			]]
-			pcall(queue_on_teleport, teleportScript)
+			local queued = pcall(queue_on_teleport, teleportScript)
+			--[[ Tells loaderdev.lua's fallback handler this teleport is already taken care of, so
+			a developer session never queues two boots. ]]
+			if queued and hasQueueOnTeleport then
+				pcall(rawset, shared, 'PistonwareTeleportQueued', true)
+			end
 
 			if not hasQueueOnTeleport then
 				pcall(function()
@@ -694,7 +1130,7 @@ end
 		makefolder('pistonware/assets/'..ASSET_FOLDER)
 	end
 	stage('downloading gui')
-	vape = runChunk(downloadFile('pistonware/guis/'..GUI_FILE..'.lua'), 'gui')
+	vape = runChunk(downloadFile('pistonware/guis/'..GUI_FILE..'.lua', nil, 'gui'), 'gui')
 	stage('gui chunk returned')
 	if not vape then return end
 	shared.vape = vape
@@ -720,7 +1156,7 @@ if not shared.VapeIndependent then
 	stage('universal.lua start')
 	do
 		local okUniversal, universalError = xpcall(function()
-			runChunk(downloadFile('pistonware/games/universal.lua'), 'universal')
+			runChunk(downloadFile('pistonware/games/universal.lua', nil, 'universal'), 'universal')
 		end, errorTrace)
 		if not okUniversal then
 			failBoot('universal.load', universalError)
@@ -748,7 +1184,10 @@ if not shared.VapeIndependent then
 	nested function the spawn needs. ]]
 	local gameArgs = table.pack(...)
 	local function runGameScript(source, chunkname)
-		local fn, compileError = loadstring(source, chunkname)
+		local fn, compileError = takeValidatedChunk(source, chunkname)
+		if not fn then
+			fn, compileError = loadstring(source, chunkname)
+		end
 		if not fn then
 			local trace = errorTrace(compileError)
 			failBoot('game.compile', trace)
@@ -814,7 +1253,7 @@ if not shared.VapeIndependent then
 	earlier failed download reads back as "present", and loadstring('') silently does
 	nothing -- indistinguishable from the game script never loading at all. ]]
 	local gameScriptStarted = false
-		local cached = cacheAllowed() and hasContent(gamePath) and readfile(gamePath) or nil
+		local cached = cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) and readfile(gamePath) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
 		gameScriptStarted = runGameScript(cached, tostring(game.PlaceId))
 	end

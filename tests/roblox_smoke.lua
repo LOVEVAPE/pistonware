@@ -533,7 +533,8 @@ do
 	expect(cached.Performance.Stats.TargetCacheRefreshes == 1,
 		'default query did not populate the cache')
 
-	now = 0.5
+	-- inside the list's lifetime, from the same spot: the saved membership is reused
+	now = 0.03
 	inside.RootPart.Position = Vector3.new(30, 0, 0)
 	boundary.RootPart.Position = Vector3.new(5, 0, 0)
 	outside.RootPart.Position = Vector3.new(6, 0, 0)
@@ -543,12 +544,28 @@ do
 	expect(#query(10, {Cache = false}) == 2,
 		'explicit uncached query did not scan all entities')
 
-	now = 0.999
-	expect(#query(10) == 1, 'cache refreshed before its one-second expiry')
-	now = 1
+	now = 0.059
+	expect(#query(10) == 1, 'cache refreshed before its lifetime ran out')
+	-- 60ms, not a second: an entity entering range is found within a few frames, where a
+	-- list held for a whole second hid anyone who closed in quickly from Killaura
+	now = 0.06
 	expect(#query(10) == 2, 'expired cache did not discover the entering entity')
 	expect(cached.Performance.Stats.TargetCacheRefreshes == 2,
 		'cache expiry did not trigger exactly one rebuild')
+
+	-- The list only covers what was near the spot it was built at. A step inside half its
+	-- spare margin (coverage 20 - range 10, halved: 5 studs) keeps it; walking further
+	-- rebuilds it, so a target we move onto is never hidden behind a list built elsewhere.
+	now = 0.07
+	cached.character.HumanoidRootPart.Position = Vector3.new(0.5, 0, 0)
+	query(10)
+	expect(cached.Performance.Stats.TargetCacheRefreshes == 2,
+		'a small step inside the margin rebuilt the cache')
+	cached.character.HumanoidRootPart.Position = Vector3.new(6, 0, 0)
+	query(10)
+	expect(cached.Performance.Stats.TargetCacheRefreshes == 3,
+		'moving past the margin reused a list built somewhere else')
+	cached.character.HumanoidRootPart.Position = Vector3.new(0, 0, 0)
 
 	now = 2
 	boundary.RootPart.Position = Vector3.new(30, 0, 0)
@@ -557,7 +574,7 @@ do
 	expect(#query(20) == 0, 'expanded candidates leaked into the result')
 	boundary.RootPart.Position = Vector3.new(5, 0, 0)
 	outside.RootPart.Position = Vector3.new(6, 0, 0)
-	now = 2.5
+	now = 2.03
 	local expanded = query(20)
 	expect(#expanded == 1 and expanded[1] == boundary,
 		'candidate radius was not exactly 150 percent for a 20-stud query')

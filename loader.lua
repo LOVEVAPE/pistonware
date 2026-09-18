@@ -749,6 +749,18 @@ local function keyDetail(status)
 	return ' ('..table.concat(parts, ', ')..')'
 end
 
+--[[ Hands the GUI the key's expiry so its footer can count it down: -1 for a lifetime key,
+otherwise the unix time it runs out. Left unset when LuaArmor did not say. ]]
+local function rememberExpiry(status)
+	local data = type(status) == 'table' and type(status.data) == 'table' and status.data or nil
+	local expire = data and tonumber(data.auth_expire)
+	if expire == -1 or expire == 0 then
+		shared.PistonwareKeyExpire = -1
+	elseif expire then
+		shared.PistonwareKeyExpire = expire
+	end
+end
+
 local function trim(s)
 	return (tostring(s):gsub('^%s*(.-)%s*$', '%1'))
 end
@@ -1581,6 +1593,9 @@ local function createConsole()
 		return bars
 	end
 
+	--[[ Assigned once the footer exists; the window buttons below are built before it. ]]
+	local applyChromeVisibility = function() end
+
 	for index, kind in {'minimize', 'maximize', 'close'} do
 		local button = Instance.new('TextButton')
 		button.AnchorPoint = Vector2.new(1, 0.5)
@@ -1616,11 +1631,13 @@ local function createConsole()
 			elseif kind == 'minimize' then
 				minimized = not minimized
 				applyWindowState(true)
+				applyChromeVisibility()
 			else
 				--[[ maximising an already rolled-up window unrolls it, as a WM would ]]
 				maximized = not maximized
 				minimized = false
 				applyWindowState(true)
+				applyChromeVisibility()
 			end
 		end)
 	end
@@ -1752,6 +1769,39 @@ local function createConsole()
 	footer.Font = Enum.Font.Code
 	footer.Parent = window
 
+	--[[ An opt-out for the question currently being asked, in the bottom-right corner opposite
+	the footer. Greyed out on purpose: it is the answer nobody should click by accident.
+	Ask() shows it only when the caller passes one, and hides it again afterwards. ]]
+	local optOutButton = Instance.new('TextButton')
+	optOutButton.AnchorPoint = Vector2.new(1, 1)
+	optOutButton.BackgroundTransparency = 1
+	optOutButton.Position = UDim2.new(1, -ContentPadding, 1, -16)
+	optOutButton.Size = UDim2.fromOffset(0, 22)
+	optOutButton.AutomaticSize = Enum.AutomaticSize.X
+	optOutButton.AutoButtonColor = false
+	optOutButton.Modal = true
+	optOutButton.Visible = false
+	optOutButton.Text = ''
+	optOutButton.TextColor3 = Palette.Footer
+	optOutButton.TextSize = 17
+	optOutButton.TextXAlignment = Enum.TextXAlignment.Right
+	optOutButton.Font = Enum.Font.Code
+	optOutButton.Parent = window
+	optOutButton.MouseEnter:Connect(function()
+		optOutButton.TextColor3 = Palette.Line
+	end)
+	optOutButton.MouseLeave:Connect(function()
+		optOutButton.TextColor3 = Palette.Footer
+	end)
+
+	--[[ The footer and the opt-out are anchored to the bottom edge, so a rolled-up window would
+	leave them floating over the titlebar. Hidden while minimised. ]]
+	local optOutActive = false
+	applyChromeVisibility = function()
+		footer.Visible = not minimized
+		optOutButton.Visible = optOutActive and not minimized
+	end
+
 	track(inputService.InputBegan:Connect(function(input, gameProcessed)
 		if gameProcessed then return end
 		if input.KeyCode == Enum.KeyCode.C and inputService:IsKeyDown(Enum.KeyCode.LeftControl) then
@@ -1852,7 +1902,7 @@ local function createConsole()
 	--[[ Asks a question on the output line, waits for one of the buttons underneath it, then
 	clears the line again so the next question can take its place. `fallback` is returned if
 	the loader is closed or the timeout elapses -- a missed click must never hang injection. ]]
-	function console:Ask(question, buttons, timeoutSeconds, fallback)
+	function console:Ask(question, buttons, timeoutSeconds, fallback, optOut)
 		if closed then return fallback end
 		self:SetLine(question)
 		clearAnswers()
@@ -1860,6 +1910,27 @@ local function createConsole()
 		tooltip.Visible = false
 
 		local choice
+		--[[ `optOut` is one more answer, {text, key, tooltip}, drawn in the corner instead of on the
+		row. Its connections are dropped when the question ends so the next Ask starts clean. ]]
+		local optOutConnections = {}
+		if optOut then
+			optOutButton.Text = optOut.text
+			optOutButton.TextColor3 = Palette.Footer
+			table.insert(optOutConnections, optOutButton.MouseButton1Click:Connect(function()
+				choice = optOut.key
+			end))
+			if optOut.tooltip then
+				table.insert(optOutConnections, optOutButton.MouseEnter:Connect(function()
+					tooltip.Text = optOut.tooltip
+					tooltip.Visible = true
+				end))
+				table.insert(optOutConnections, optOutButton.MouseLeave:Connect(function()
+					tooltip.Visible = false
+				end))
+			end
+			optOutActive = true
+			applyChromeVisibility()
+		end
 		for index, def in buttons do
 			local button = answerButton(def.text, 132, index)
 			if def.tooltip then
@@ -1880,6 +1951,11 @@ local function createConsole()
 		local timeout = os.clock() + (timeoutSeconds or 60)
 		repeat task.wait() until choice ~= nil or closed or os.clock() > timeout
 		answers.Visible = false
+		optOutActive = false
+		applyChromeVisibility()
+		for _, connection in optOutConnections do
+			connection:Disconnect()
+		end
 		clearAnswers()
 		tooltip.Visible = false
 		self:SetLine('')
@@ -2414,6 +2490,7 @@ do
 			session key must not be able to destroy the good one the user has saved. ]]
 			local fromDisk = candidate == savedKey
 			if code == 'KEY_VALID' then
+				rememberExpiry(status)
 				authenticate(candidate)
 				--[[ Persist whatever just worked. This is what makes LuaArmor's snippet behave
 				the way people expect: paste it once, the key lands in pistonwarekey.json,
@@ -2579,6 +2656,7 @@ do
 					local code = status.code
 					if code == 'KEY_VALID' then
 						saveKey(key)
+						rememberExpiry(status)
 						say(t('valid_loading', keyDetail(status)), 'ok')
 						authenticate(key)
 						return true
@@ -2812,7 +2890,15 @@ download/sync, offer to overwrite the shipped configs with the latest ones. Only
 that exist in the GitHub profiles folder get redownloaded -- profiles the user made
 themselves are left alone. Skipped on reinjects/teleports so it only ever asks once per
 session, on the first manual execution. ]]
-if not firstRunProfiles and not declinedDownload and not isReload then
+--[[ optout.txt is written by 'Do not ask me again' on the sync prompt below. Its presence is
+the whole signal -- delete the file to be asked again. Checked before the fingerprint
+fetch so an opted-out boot does not spend a request on a question it will never ask. ]]
+local syncOptedOut = false
+pcall(function()
+	syncOptedOut = isfile('pistonware/optout.txt')
+end)
+
+if not firstRunProfiles and not declinedDownload and not isReload and not syncOptedOut then
 	local latestCommit, cachedCommit
 	pcall(function()
 		latestCommit = profilesFingerprint()
@@ -2835,9 +2921,12 @@ if not firstRunProfiles and not declinedDownload and not isReload then
 			return console:Ask('Would you like to sync to the latest config?', {
 				{text = 'Yes', key = true, tooltip = 'Replaces the shipped configs with the newer ones on GitHub'},
 				{text = 'No', key = false, tooltip = 'Keeps the configs you have, asks again next session'}
-			}, 60, false)
+			}, 60, false, {text = 'Do not ask me again', key = 'optout', tooltip = 'Keeps the configs you have and never asks again'})
 		end)
 		if console:IsAborted() then deleteInstall() return end
+		if ok and wantsSync == 'optout' then
+			pcall(writefile, 'pistonware/optout.txt', 'true')
+		end
 		if ok and wantsSync == true then
 			console:SetLine('Syncing configs...')
 

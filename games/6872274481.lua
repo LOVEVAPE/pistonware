@@ -56,8 +56,19 @@ local function callWithThreadFix(func)
 	return ok, err
 end
 
+--[[ Registration yields a frame once it has held the game thread for FRAME_BUDGET. Every
+module here and in bedwars.lua used to be built back to back -- the modules, their options
+and the GUI objects behind all of it -- in one uninterrupted stretch, which is one long
+freeze on every inject and reinject. VapeSmoothBoot already yields between every block and
+the whole file is written to survive that, so this is the same yield, taken only when the
+frame is actually spent: a boot that fits in a frame is exactly as fast as before. ]]
+local FRAME_BUDGET = 0.012
+local lastBootYield = os.clock()
 local run = function(func)
-	if shared.VapeSmoothBoot then task.wait() end
+	if shared.VapeSmoothBoot or os.clock() - lastBootYield > FRAME_BUDGET then
+		task.wait()
+		lastBootYield = os.clock()
+	end
 	local ok, err = callWithThreadFix(func)
 	if not ok then
 		bufferCall('error', 'bedwars.module', err, {traceback = err})
@@ -172,6 +183,8 @@ local Reach = {}
 local HitBoxes = {}
 local InfiniteFly = {}
 local TrapDisabler
+-- Which trap reports TrapDisabler drops, keyed by the remote the trap's controller fires.
+local TrapToggles = {}
 local AntiFallPart
 local bedwars, remotes, sides, oldinvrender, oldSwing = {}, {}, {}
 
@@ -567,6 +580,7 @@ end
 vape:Clean(inputService.InputBegan:Connect(markInput))
 vape:Clean(inputService.InputChanged:Connect(markInput))
 
+-- `seconds` overrides the default for a module that lets you pick its own threshold.
 local function isLocalAfk()
 	return (tick() - store.lastInput) >= AFK_SECONDS
 end
@@ -2079,6 +2093,22 @@ end
 local RunLoops = {RenderStepTable = {}, StepTable = {}, HeartTable = {}}
 local vapeConnections = {}
 
+--[[ Nothing used to disconnect either table on uninject. A run loop left bound kept running
+into the next injection, and bedwars.lua's vapeConnections (lplr attribute and death handlers)
+gained another live copy every reinject. ]]
+vape:Clean(function()
+    for _, loops in {RunLoops.RenderStepTable, RunLoops.StepTable, RunLoops.HeartTable} do
+        for name, connection in loops do
+            pcall(function() connection:Disconnect() end)
+            loops[name] = nil
+        end
+    end
+    for index, connection in vapeConnections do
+        pcall(function() connection:Disconnect() end)
+        vapeConnections[index] = nil
+    end
+end)
+
 function RunLoops:BindToRenderStep(name, func)
     if RunLoops.RenderStepTable[name] == nil then
         RunLoops.RenderStepTable[name] = runService.RenderStepped:Connect(func)
@@ -2387,7 +2417,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		-- this one, and stays nil for the session if that block fails (which is exactly what
 		-- run() is there to survive). Indexing it then threw on every Client:Get for the trap
 		-- remote -- inside the hot path every remote in the game goes through.
-		elseif remoteName == 'StepOnSnapTrap' and TrapDisabler and TrapDisabler.Enabled then
+		elseif TrapDisabler and TrapDisabler.Enabled and TrapToggles[remoteName] and TrapToggles[remoteName].Enabled then
 			return {SendToServer = function() end}
 		elseif remoteName == 'SwordSwingMiss' and vape.Modules and vape.Modules.NoClickDelay and vape.Modules.NoClickDelay.Enabled then
 			return {SendToServer = function() end}
@@ -4057,7 +4087,7 @@ run(function()
 	})
 	SelfAFK = TriggerBot:CreateToggle({
 		Name = 'AFK check',
-		Tooltip = 'Stops attacking once you have not touched your mouse or keyboard for 30 seconds'
+		Tooltip = 'Goes idle after 30 seconds without any mouse or keyboard input'
 	})
 end)
 	
@@ -4554,7 +4584,7 @@ run(function()
 		ExtraText = function()
 			return 'Heatseeker'
 		end,
-		Tooltip = 'Makes you go zoom.'
+		Tooltip = 'Moves you faster than your walk speed allows'
 	})
 
 	Value = Fly:CreateSlider({
@@ -5042,7 +5072,7 @@ run(function()
 				Folder:ClearAllChildren()
 			end
 		end,
-		Tooltip = 'ESP for certain kit related objects'
+		Tooltip = 'Marks the things your kit collects, like bees, orbs and hidden metal'
 	})
 
 	Background = KitESP:CreateToggle({
@@ -6012,8 +6042,6 @@ run(function()
 		table.clear(Building)
 		table.clear(UpdateGen)
 
-		showGameNametags('nametags')
-
 		if Removed[methodused] then
 			for ent in Reference do
 				Removed[methodused](ent)
@@ -6038,10 +6066,8 @@ run(function()
 				end
 				liveSetup = true
 
-				--[[ Ours replaces the game's rather than sitting on top of it. Same name,
-				same health, same spot -- with both up the text renders twice and the game's
-				own icon shows up beside it. ]]
-				hideGameNametags('nametags')
+				--[[ The game's own nametags are left alone. NameTags used to switch them off while it
+				was on, and that broke them (including your own) after a late join. ]]
 
 				methodused = DrawingToggle.Enabled and 'Drawing' or 'Normal'
 				if Removed[methodused] then
@@ -6330,9 +6356,12 @@ end)
 run(function()
 	local StorageESP
 	local List
+	local ShowAmount
 	local Background
 	local Color = {}
 	local Reference = {}
+	-- Per billboard: the Amount watchers on the items it is showing, replaced on each refresh.
+	local AmountWatch = setmetatable({}, {__mode = 'k'})
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
 	
@@ -6356,7 +6385,18 @@ run(function()
 				obj:Destroy()
 			end
 		end
-	
+		for _, connection in AmountWatch[v] or {} do
+			connection:Disconnect()
+		end
+		AmountWatch[v] = {}
+
+		-- Totals per item type: a chest can hold the same item in more than one stack. Amount
+		-- is the attribute the game's own chest display reads.
+		local amounts = {}
+		for _, item in chestitems do
+			amounts[item.Name] = (amounts[item.Name] or 0) + (tonumber(item:GetAttribute('Amount')) or 1)
+		end
+
 		v.Enabled = false
 		local alreadygot = {}
 		for _, item in chestitems do
@@ -6368,6 +6408,31 @@ run(function()
 				blockimage.BackgroundTransparency = 1
 				blockimage.Image = bedwars.getIcon({itemType = item.Name}, true)
 				blockimage.Parent = v.Frame
+				if ShowAmount.Enabled and amounts[item.Name] > 1 then
+					local amount = Instance.new('TextLabel')
+					amount.Name = 'Amount'
+					amount.Size = UDim2.fromOffset(31, 14)
+					amount.Position = UDim2.fromOffset(0, 18)
+					amount.BackgroundTransparency = 1
+					amount.Text = tostring(amounts[item.Name])
+					amount.TextXAlignment = Enum.TextXAlignment.Right
+					amount.TextSize = 14
+					amount.TextColor3 = uipallet.Text
+					amount.TextStrokeColor3 = Color3.new()
+					amount.TextStrokeTransparency = 0.4
+					amount.FontFace = uipallet.Font
+					amount.Parent = blockimage
+				end
+			end
+		end
+		-- Someone taking half a stack changes the count without adding or removing a child.
+		if ShowAmount.Enabled then
+			for _, item in chestitems do
+				if alreadygot[item.Name] then
+					table.insert(AmountWatch[v], item:GetAttributeChangedSignal('Amount'):Connect(function()
+						refreshAdornee(v)
+					end))
+				end
 			end
 		end
 		table.clear(chestitems)
@@ -6375,7 +6440,7 @@ run(function()
 	
 	local function Added(v)
 		local chest = v:WaitForChild('ChestFolderValue', 3)
-		if not (chest and StorageESP.Enabled) then return end
+		if not (chest and StorageESP.Enabled) or Reference[v] then return end
 		chest = chest.Value
 		local billboard = Instance.new('BillboardGui')
 		billboard.Parent = Folder
@@ -6423,10 +6488,28 @@ run(function()
 		Function = function(callback)
 			if callback then
 				StorageESP:Clean(collectionService:GetInstanceAddedSignal('chest'):Connect(Added))
+				-- A broken chest used to leave its icons hanging in the air where it stood.
+				StorageESP:Clean(collectionService:GetInstanceRemovedSignal('chest'):Connect(function(v)
+					local billboard = Reference[v]
+					if billboard then
+						for _, connection in AmountWatch[billboard] or {} do
+							connection:Disconnect()
+						end
+						AmountWatch[billboard] = nil
+						billboard:Destroy()
+						Reference[v] = nil
+					end
+				end))
 				for _, v in collectionService:GetTagged('chest') do
 					task.spawn(Added, v)
 				end
 			else
+				for _, list in AmountWatch do
+					for _, connection in list do
+						connection:Disconnect()
+					end
+				end
+				table.clear(AmountWatch)
 				table.clear(Reference)
 				Folder:ClearAllChildren()
 			end
@@ -6440,6 +6523,16 @@ run(function()
 				task.spawn(refreshAdornee, v)
 			end
 		end
+	})
+	ShowAmount = StorageESP:CreateToggle({
+		Name = 'Show amount',
+		Default = true,
+		Function = function()
+			for _, v in Reference do
+				task.spawn(refreshAdornee, v)
+			end
+		end,
+		Tooltip = 'Shows how many of each item the chest holds.'
 	})
 	Background = StorageESP:CreateToggle({
 		Name = 'Background',
@@ -7228,7 +7321,27 @@ end)
 run(function()
 	TrapDisabler = vape.Categories.Utility:CreateModule({
 		Name = 'TrapDisabler',
-		Tooltip = 'Turns off snap traps'
+		Tooltip = 'Drops the report your client sends when you walk into a trap, so it never goes off on you.'
+	})
+	-- Each of these is a trap whose controller reports YOU stepping on it, through one remote
+	-- each (snap-trap, invisible-landmine, teleport-block and void-teleport-portal controllers).
+	TrapToggles.StepOnSnapTrap = TrapDisabler:CreateToggle({
+		Name = 'Snap traps',
+		Default = true,
+		Tooltip = 'Trapper snap traps.'
+	})
+	TrapToggles.TriggerInvisibleLandmine = TrapDisabler:CreateToggle({
+		Name = 'Landmines',
+		Default = true,
+		Tooltip = 'Invisible landmines.'
+	})
+	TrapToggles.StepOnTeleportBlock = TrapDisabler:CreateToggle({
+		Name = 'Teleport blocks',
+		Tooltip = 'Teleport blocks. This also stops the ones your own team places from moving you.'
+	})
+	TrapToggles.StepOnVoidPortal = TrapDisabler:CreateToggle({
+		Name = 'Void portals',
+		Tooltip = 'Void portals. This also stops your own from moving you.'
 	})
 end)
 	
@@ -7335,23 +7448,31 @@ end)
 	
 run(function()
 	local AutoTool
+	local SwitchBack
 	local old, event
+	-- The slot you were on before the first swap, the tool slot swapped to, and when a block
+	-- was last hit, so Switch back can put your hand back once you stop mining.
+	local previous, switchedTo, lastHit, returning = nil, nil, 0, false
 	
 	local function switchHotbarItem(block)
-		if block and not block:GetAttribute('NoBreak') and not block:GetAttribute('Team'..(lplr:GetAttribute('Team') or 0)..'NoBreak') then
-			local tool, slot = store.tools[bedwars.ItemMeta[block.Name].block.breakType], nil
-			if tool then
-				for i, v in store.inventory.hotbar do
-					if v.item and v.item.itemType == tool.itemType then slot = i - 1 break end
-				end
-	
-				if hotbarSwitch(slot) then
-					if inputService:IsMouseButtonPressed(0) then 
-						event:Fire() 
-					end
-					return true
-				end
+		if not block or block:GetAttribute('NoBreak') or block:GetAttribute('Team'..(lplr:GetAttribute('Team') or 0)..'NoBreak') then return end
+		-- Not everything you can hit has block meta; indexing .block.breakType off one that
+		-- does not threw inside the game's own break call.
+		local meta = bedwars.ItemMeta[block.Name]
+		local tool = meta and meta.block and store.tools[meta.block.breakType]
+		if not tool then return end
+		local slot
+		for i, v in store.inventory.hotbar do
+			if v.item and v.item.itemType == tool.itemType then slot = i - 1 break end
+		end
+		local from = store.inventory.hotbarSlot
+		if hotbarSwitch(slot) then
+			previous = previous or from
+			switchedTo = slot
+			if inputService:IsMouseButtonPressed(0) then 
+				event:Fire() 
 			end
+			return true
 		end
 	end
 	
@@ -7359,6 +7480,7 @@ run(function()
 		Name = 'AutoTool',
 		Function = function(callback)
 			if callback then
+				previous, switchedTo, lastHit, returning = nil, nil, 0, false
 				event = Instance.new('BindableEvent')
 				AutoTool:Clean(event)
 				AutoTool:Clean(event.Event:Connect(function()
@@ -7366,16 +7488,35 @@ run(function()
 				end))
 				old = bedwars.BlockBreaker.hitBlock
 				bedwars.BlockBreaker.hitBlock = function(self, maid, raycastparams, ...)
+					lastHit = os.clock()
 					local block = self.clientManager:getBlockSelector():getMouseInfo(1, {ray = raycastparams})
 					if switchHotbarItem(block and block.target and block.target.blockInstance or nil) then return end
 					return old(self, maid, raycastparams, ...)
 				end
+				-- Back to what you were holding once the hits stop -- but only while you are still
+				-- on the tool it picked, so a slot you changed yourself is left alone.
+				AutoTool:Clean(runService.Heartbeat:Connect(function()
+					if not (SwitchBack.Enabled and previous) or returning or os.clock() - lastHit < 0.35 then return end
+					local slot = previous
+					previous = nil
+					if store.inventory.hotbarSlot ~= switchedTo then return end
+					returning = true
+					task.spawn(function()
+						hotbarSwitch(slot)
+						returning = false
+					end)
+				end))
 			else
 				bedwars.BlockBreaker.hitBlock = old
 				old = nil
+				previous, switchedTo = nil, nil
 			end
 		end,
 		Tooltip = 'Grabs the right tool for you'
+	})
+	SwitchBack = AutoTool:CreateToggle({
+		Name = 'Switch back',
+		Tooltip = 'Puts back what you were holding once you stop mining.'
 	})
 end)
 	
@@ -11287,12 +11428,15 @@ local function downloadBedwars()
         if type(res) ~= 'string' or res == '' then
             return nil, bootFailure('bedwars.local.missing', 'developer mode requires pistonware/games/bedwars.lua')
         end
-        local localFunc, compileError = compileBedwarsSource(res, 'bedwars.local')
+        --[[ Compiled under the name it runs as and handed back, so the caller runs this chunk
+        instead of compiling the same ~1MB a second time -- which it used to, on the game
+        thread, every inject. The failure is still reported as bedwars.local.compile. ]]
+        local localFunc, compileError = compileBedwarsSource(res, 'bedwars')
         if not localFunc then
             return nil, bootFailure('bedwars.local.compile', compileError)
         end
 		bufferCall('print', 'bedwars.developer', 'running local games/bedwars.lua')
-        return res
+        return res, nil, localFunc
     end
 
     local lastFailure
@@ -11345,7 +11489,7 @@ local function republishKey()
     return true
 end
 
-local bedwarsSource, bedwarsFailure = downloadBedwars()
+local bedwarsSource, bedwarsFailure, bedwarsCompiled = downloadBedwars()
 if not bedwarsSource then
     local failure = bedwarsFailure or bootFailure('bedwars.download', 'no usable BedWars payload')
 	bufferCall('error', failure.stage, failure.error)
@@ -11355,7 +11499,10 @@ if not bedwarsSource then
     return failure
 end
 
-local bedwarsFn, bedwarsCompileError = compileBedwarsSource(bedwarsSource, 'bedwars')
+local bedwarsFn, bedwarsCompileError = bedwarsCompiled, nil
+if not bedwarsFn then
+    bedwarsFn, bedwarsCompileError = compileBedwarsSource(bedwarsSource, 'bedwars')
+end
 if not bedwarsFn then
     local failure = bootFailure('bedwars.compile', bedwarsCompileError)
 	bufferCall('error', failure.stage, failure.error)
