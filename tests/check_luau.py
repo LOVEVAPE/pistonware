@@ -206,7 +206,10 @@ def run_parser(compiler: Path, files: list[Path]) -> None:
 
 
 def run_compiler(compiler: Path, files: list[Path]) -> None:
-    command = [str(compiler), *(str(path.relative_to(ROOT)) for path in files)]
+    # -O0 -g2: executors compile with full debug info, and neither setting lets constant
+    # locals be folded away -- so a chunk near the 200-register cap passes at the default
+    # -O1 -g1 and fails in game.
+    command = [str(compiler), "-O0", "-g2", *(str(path.relative_to(ROOT)) for path in files)]
     result = subprocess.run(
         command,
         cwd=ROOT,
