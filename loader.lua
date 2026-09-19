@@ -855,6 +855,75 @@ end
 	to that commit. A matching local marker remains the offline fallback when both metadata calls
 	are unavailable.
 ]]
+--[[ GitHub requests for the release lookup, made so a failure says WHY and never throws.
+
+Both 'Loader stopped' reports came out of this lookup:
+
+  "Can't parse JSON"  game:HttpGet sends no User-Agent on some executors, and api.github.com
+                      answers a request without one with a plain-text 403 ("Request
+                      forbidden by administrative rules...") -- JSONDecode on that throws.
+  "branch metadata did not contain a verified commit"
+                      the REST API allows 60 unauthenticated requests an hour per IP. Past
+                      that it answers with a JSON error object and no commit. A shared IP, a
+                      VPN or a handful of reinjects in an hour is enough.
+
+So the executor's request function goes first, with a User-Agent, and the status code is read
+rather than guessed from the body. HttpGet stays as the fallback for executors without one. ]]
+local GITHUB_HEADERS = {['User-Agent'] = 'pistonware-loader', Accept = 'application/vnd.github+json'}
+
+local function describeGithubFailure(status, body)
+	local detail
+	pcall(function()
+		local decoded = cloneref(game:GetService('HttpService')):JSONDecode(body)
+		if type(decoded) == 'table' and type(decoded.message) == 'string' then
+			detail = decoded.message
+		end
+	end)
+	if detail then
+		-- The rate-limit message names the caller's IP, which has no business in a log or report.
+		detail = (detail:gsub('%d+%.%d+%.%d+%.%d+', '<ip>'))
+		detail = (detail:gsub('%x*:%x*:[%x:]+', '<ip>'))
+	end
+	return (status and ('GitHub answered '..status) or 'GitHub refused the request')
+		..(detail and (': '..safeText(detail, 200)) or '')
+end
+
+local function githubGet(url)
+	local requestFn = telemetry.requestFn
+	if requestFn then
+		local ok, res = pcall(requestFn, {Url = url, Method = 'GET', Headers = GITHUB_HEADERS})
+		if ok and type(res) == 'table' and type(res.Body) == 'string' then
+			local status = tonumber(res.StatusCode) or 200
+			if status >= 200 and status < 300 then
+				if res.Body ~= '' then return res.Body end
+				return nil, 'GitHub sent an empty response'
+			end
+			return nil, describeGithubFailure(status, res.Body)
+		end
+	end
+	local ok, body = pcall(function()
+		return game:HttpGet(url, true)
+	end)
+	if ok and type(body) == 'string' and body ~= '' then return body end
+	return nil, ok and 'GitHub sent an empty response' or safeText(body, 200)
+end
+
+local function githubJson(url)
+	local body, err = githubGet(url)
+	if not body then return nil, err end
+	local ok, decoded = pcall(function()
+		return cloneref(game:GetService('HttpService')):JSONDecode(body)
+	end)
+	if not (ok and type(decoded) == 'table') then
+		return nil, 'GitHub sent a response that is not JSON'
+	end
+	-- An error object that came through HttpGet, which hides the status code.
+	if type(decoded.message) == 'string' and decoded.sha == nil and decoded.commit == nil then
+		return nil, describeGithubFailure(nil, body)
+	end
+	return decoded
+end
+
 local repoTree, repoTreeTried, repoTreeDone
 local repoTreeError
 local function fetchRepoTree()
@@ -871,13 +940,14 @@ local function fetchRepoTree()
 	end
 	repoTreeTried = true
 	local ok, err = pcall(function()
-		local httpService = cloneref(game:GetService('HttpService'))
-		local body = httpService:JSONDecode(game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/git/trees/'..(release.sourceRef or release.branch)..'?recursive=1', true))
+		local body, treeErr = githubJson('https://api.github.com/repos/themagicpiston/pistonware/git/trees/'..(release.sourceRef or release.branch)..'?recursive=1')
 		if type(body) == 'table' and type(body.tree) == 'table' and type(body.sha) == 'string' then
 			repoTree = body
 			--[[ Handed to main.lua so its asset prefetch reads this instead of spending its own
 			contents/ calls. It only needs the paths, and they are all in here already. ]]
 			shared.PistonwareRepoTree = body
+		else
+			error(treeErr or 'the repository tree was missing its file list', 0)
 		end
 	end)
 	if not ok then
@@ -903,6 +973,37 @@ local function validCommit(value)
 	return type(value) == 'string' and #value == 40 and value:match('^%x+$') ~= nil
 end
 
+--[[ The branch head without the REST API, so without its hourly limit. Git's own smart-HTTP
+ref advertisement -- what `git clone` reads first -- lists every branch as a pkt-line,
+'<4 hex length><40 hex sha> refs/heads/<name>'. The first line also carries HEAD and the
+capability list after a NUL, which the ref match below never reaches for a branch. ]]
+local function commitFromGitRefs()
+	local body, err = githubGet('https://github.com/themagicpiston/pistonware.git/info/refs?service=git-upload-pack')
+	if not body then return nil, err end
+	local wanted = 'refs/heads/'..release.branch
+	for line in body:gmatch('[^\n]+') do
+		local hex, ref = line:match('^(%x+) (%S+)')
+		if ref then
+			local nul = ref:find('\0', 1, true)
+			if nul then ref = ref:sub(1, nul - 1) end
+		end
+		if ref == wanted and #hex >= 40 then
+			local sha = hex:sub(-40)
+			if validCommit(sha) then return sha end
+		end
+	end
+	return nil, 'the git refs did not list branch '..release.branch
+end
+
+-- Second non-API source: the branch's commit feed, newest commit first.
+local function commitFromFeed()
+	local body, err = githubGet('https://github.com/themagicpiston/pistonware/commits/'..release.branch..'.atom')
+	if not body then return nil, err end
+	local sha = body:match('Grit::Commit/(%x+)')
+	if validCommit(sha) then return sha end
+	return nil, 'the commit feed did not list a commit'
+end
+
 local branchCommit, branchCommitTried, branchCommitDone
 local branchCommitError
 local function fetchBranchCommit()
@@ -913,19 +1014,34 @@ local function fetchBranchCommit()
 		return branchCommit
 	end
 	branchCommitTried = true
+	-- Why each source failed, in order, so a report names every one of them.
+	local reasons = {}
 	local ok, err = pcall(function()
-		local httpService = cloneref(game:GetService('HttpService'))
-		local body = httpService:JSONDecode(game:HttpGet(
-			'https://api.github.com/repos/themagicpiston/pistonware/branches/'..release.branch, true))
+		local body, apiErr = githubJson('https://api.github.com/repos/themagicpiston/pistonware/branches/'..release.branch)
 		local commit = type(body) == 'table' and type(body.commit) == 'table' and body.commit.sha
 		if validCommit(commit) then
 			branchCommit = commit
-		else
-			branchCommitError = 'branch metadata did not contain a verified commit'
+			return
+		end
+		table.insert(reasons, 'API: '..(apiErr or 'no commit in the branch metadata'))
+		for _, source in {{'git refs', commitFromGitRefs}, {'commit feed', commitFromFeed}} do
+			local sha, sourceErr = source[2]()
+			if validCommit(sha) then
+				branchCommit = sha
+				return
+			end
+			table.insert(reasons, source[1]..': '..tostring(sourceErr))
 		end
 	end)
 	if not ok then
-		branchCommitError = safeText(err)
+		table.insert(reasons, safeText(err, 200))
+	end
+	if branchCommit then
+		if #reasons > 0 then
+			logger:info('version.branch', 'resolved the branch without the GitHub API', {reasons = table.concat(reasons, '; '), branch = release.branch})
+		end
+	else
+		branchCommitError = 'could not find the latest commit of branch '..release.branch..' ('..table.concat(reasons, '; ')..')'
 		logger:warn('version.branch', 'could not resolve the selected branch', {error = branchCommitError, branch = release.branch})
 		telemetry:report('loader_error', branchCommitError, {stage = 'version.branch', fatal = false})
 	end
@@ -991,7 +1107,27 @@ local function resolveRelease()
 		})
 		return true
 	end
-	return false, branchCommitError or repoTreeError or ('branch '..release.branch..' has no verified release')
+	--[[ Nothing could name a commit and there is no earlier release on disk -- a first run
+	behind a network that blocks github.com as well as the API. Load the branch as it stands
+	instead of refusing to load at all. The commit pin buys consistency (every file from one
+	snapshot), not authenticity: a sha read from GitHub is no more trustworthy than the
+	branch it came from, and both come over HTTPS from the same place. Nothing is cached as
+	ready (every file is fetched fresh) and no marker is written, so the next run that can
+	resolve a commit pins it as normal. ]]
+	release.commit = nil
+	release.sourceRef = release.branch
+	release.version = release.channel..'@'..release.branch
+	release.resolved = true
+	release.cacheReady = false
+	shared.PistonwareRelease = release
+	local reason = branchCommitError or repoTreeError or ('branch '..release.branch..' has no verified release')
+	logger:warn('version.unpinned', 'loading the branch head because no commit could be resolved', {
+		channel = release.channel,
+		branch = release.branch,
+		reason = reason
+	})
+	telemetry:report('loader_error', reason, {stage = 'version.unpinned', fatal = false})
+	return true
 end
 
 local function persistReleaseMarker()
