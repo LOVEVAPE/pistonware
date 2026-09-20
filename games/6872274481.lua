@@ -2265,6 +2265,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		BedBreakEffectMeta = require(replicatedStorage.TS.locker['bed-break-effect']['bed-break-effect-meta']).BedBreakEffectMeta,
 		BedwarsKitMeta = require(replicatedStorage.TS.games.bedwars.kit['bedwars-kit-meta']).BedwarsKitMeta,
 		BlackMarketeerBalance = require(replicatedStorage.TS.balance['black-marketeer-balance']).BlackMarketeerBalance,
+		BuilderUtil = require(replicatedStorage.TS.games.bedwars.kit.kits.builder['builder-util']).BuilderUtil,
 		JuggernautUtil = require(replicatedStorage.TS.balance['juggernaut-balance-file']).JuggernautUtil,
 		BlockBreaker = Knit.Controllers.BlockBreakController.blockBreaker,
 		BlockController = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['block-engine'].out).BlockEngine,
@@ -2332,6 +2333,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		StatusEffectType = require(replicatedStorage.TS['status-effect']['status-effect-type']).StatusEffectType,
 		Store = require(lplr.PlayerScripts.TS.ui.store).ClientStore,
 		SummonerKitBalance = require(replicatedStorage.TS.games.bedwars.kit.kits.summoner['summoner-kit-balance']).SummonerKitBalance,
+		SwordsConstants = require(replicatedStorage.TS.combat['combat-constant']).SwordsConstants,
 		SyncEventPriority = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['sync-event'].out).SyncEventPriority,
 		TeamUpgradeMeta = require(replicatedStorage.TS.games.bedwars['team-upgrade']['team-upgrade-meta']).getTeamUpgradeMetaForQueue(),
 		UILayers = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out).UILayers,
@@ -6844,6 +6846,7 @@ end)
 run(function()
 	local AutoVoidDrop
 	local OwlCheck
+	local AutoReset
 	
 	AutoVoidDrop = vape.Categories.Inventory:CreateModule({
 		Name = 'AutoVoidDrop',
@@ -6865,9 +6868,12 @@ run(function()
 						local root = entitylib.character.RootPart
 						if root.Position.Y < lowestpoint and (lplr.Character:GetAttribute('InflatedBalloons') or 0) <= 0 and not getItem('balloon') then
 							if not OwlCheck.Enabled or not root:FindFirstChild('OwlLiftForce') then
+								local dropped = false
+	
 								for _, item in {'iron', 'diamond', 'emerald', 'gold'} do
 									item = getItem(item)
 									if item then
+										dropped = true
 										item = bedwars.Client:Get(remotes.DropItem):CallServer({
 											item = item.tool,
 											amount = item.amount
@@ -6877,6 +6883,10 @@ run(function()
 											item:SetAttribute('ClientDropTime', os.clock() + 100)
 										end
 									end
+								end
+	
+								if dropped and AutoReset.Enabled then
+									bedwars.Client:Get(remotes.ResetCharacter):SendToServer()
 								end
 							end
 						end
@@ -6892,6 +6902,11 @@ run(function()
 		Name = 'Owl check',
 		Default = true,
 		Tooltip = 'Holds onto your items if an owl is coming for them'
+	})
+	AutoReset = AutoVoidDrop:CreateToggle({
+		Name = 'Auto Reset',
+		Default = true,
+		Tooltip = 'Resets you the moment your resources are dropped'
 	})
 end)
 	

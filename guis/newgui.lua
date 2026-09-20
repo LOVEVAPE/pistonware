@@ -1789,6 +1789,11 @@ function vape:LoadGUI()
 	clickgui.Size = UDim2.fromScale(1, 1)
 	clickgui.Visible = false
 	clickgui.Parent = scaledgui
+	--[[ Mirrored as a plain field for the modules' GUI checks. On ThreadFix executors this
+	gui sits under gethui/CoreGui, and reading the Instance from a module loop -- a thread
+	a profile apply or a GUI click started, without the raised identity -- throws. A
+	table field reads the same from any thread. Kept current by the Visible watcher below. ]]
+	vape.ClickGuiOpen = false
 	local scarcitybanner = Instance.new('TextLabel')
 	scarcitybanner.BackgroundTransparency = 1
 	scarcitybanner.FontFace = uipallet.Font
@@ -4593,6 +4598,7 @@ function vape:LoadGUI()
 	
 	local cursorConnection
 	vape:Clean(clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
+		vape.ClickGuiOpen = clickgui.Visible
 		if not clickgui.Visible then
 			tooltip.Visible = false
 			tooltip.Text = ''
@@ -4813,6 +4819,7 @@ function vape:BlockSaving()
 	self.SaveBlocked = true
 	self.SaveNeeded = nil
 	self.SaveQueued = nil
+	self.SaveDeadline = nil
 	self.SaveEpoch = (self.SaveEpoch or 0) + 1
 	return false
 end
@@ -4904,7 +4911,8 @@ function vape:RequestSave()
 		return false
 	end
 
-	self.SaveTime = os.clock() + 0.4
+	local now = os.clock()
+	self.SaveTime = now + 0.4
 
 	if self.SaveQueued then
 		return true
@@ -4912,6 +4920,12 @@ function vape:RequestSave()
 
 	local epoch = self.SaveEpoch or 0
 	self.SaveQueued = epoch
+	--[[ A ceiling on the coalescing, because every option change asks to save now and some of
+	them arrive in a stream: a slider being dragged, a text box being typed into, a module
+	writing its own option. Each one pushes SaveTime forward, so the window alone would keep
+	postponing the write for as long as the stream lasts and a long drag would write nothing
+	until it ended. Still one write per burst, just never later than this. ]]
+	self.SaveDeadline = now + 2
 
 	local function flush()
 		if self.SaveQueued ~= epoch or self.SaveEpoch ~= epoch then return end
@@ -4919,13 +4933,14 @@ function vape:RequestSave()
 			setthreadidentity(8)
 		end
 
-		local remaining = self.SaveTime - os.clock()
+		local remaining = math.min(self.SaveTime, self.SaveDeadline or math.huge) - os.clock()
 		if remaining > 0 then
 			task.delay(remaining, flush)
 			return
 		end
 
 		self.SaveQueued = nil
+		self.SaveDeadline = nil
 		self.SaveNeeded = nil
 
 		if self:CanSave() then
@@ -5403,6 +5418,7 @@ components = {
 					table.insert(vape.ActiveBinds, component)
 				end
 			end
+			vape:RequestSave()
 		end
 		
 		function component:SetColor(newColor)
@@ -6826,6 +6842,11 @@ components = {
 			end
 		
 			props.Function(self.Hue, self.Sat, self.Value, self.Opacity)
+			-- Rainbow drives SetValue from the animation loop every frame, and the hue it
+			-- happens to be on is nobody's setting -- so only a real change asks to save.
+			if not self.Rainbow then
+				vape:RequestSave()
+			end
 		end
 		
 		function component:Toggle()
@@ -6856,6 +6877,7 @@ components = {
 					end)
 				end)
 			end
+			vape:RequestSave()
 		end
 		
 		preview.MouseButton1Click:Connect(function()
@@ -7064,6 +7086,7 @@ components = {
 			end
 		
 			props.Function(self.Value, isClick)
+			vape:RequestSave()
 		end
 		
 		button.MouseButton1Click:Connect(function()
@@ -7865,6 +7888,10 @@ components = {
 			end
 		
 			props.Function(self.Hue, self.Sat, self.Value)
+			-- see the ColorSlider above: not while the rainbow loop is driving it
+			if not self.Rainbow then
+				vape:RequestSave()
+			end
 		end
 		
 		function component:Toggle()
@@ -7899,6 +7926,7 @@ components = {
 					end)
 				end)
 			end
+			vape:RequestSave()
 		end
 		
 		expand.MouseEnter:Connect(function()
@@ -8039,6 +8067,7 @@ components = {
 			})
 		
 			props.Function(self.Enabled)
+			vape:RequestSave()
 		end
 		
 		-- The Scale listener that stood here is gone. It rewrote toggle.Text to the exact
@@ -9733,6 +9762,7 @@ components = {
 				self.Value = value
 				valuelabel.Text = self.Value..(props.Suffix and ' '..(type(props.Suffix) == 'function' and props.Suffix(self.Value) or props.Suffix) or '')
 				props.Function(value, wasReleased)
+				vape:RequestSave()
 			end
 		end
 		
@@ -10117,6 +10147,7 @@ components = {
 		
 			props.Targets:UpdateText()
 			props.Function(self.Enabled)
+			vape:RequestSave()
 		end
 		
 		targetsbutton.MouseEnter:Connect(function()
@@ -10214,6 +10245,7 @@ components = {
 			self.Value = val
 			inputbox.Text = val
 			props.Function(enter)
+			vape:RequestSave()
 		end
 		
 		textbox.MouseButton1Click:Connect(function()
@@ -10388,6 +10420,9 @@ components = {
 			end
 		
 			props.Function(self.List)
+			if value ~= nil then
+				vape:RequestSave()
+			end
 			for _, v in self.Objects do
 				v:Destroy()
 			end
@@ -10486,6 +10521,7 @@ components = {
 		
 					items.Text = #self.ListEnabled > 0 and table.concat(self.ListEnabled, ', ') or 'None'
 					props.Function()
+					vape:RequestSave()
 				end)
 		
 				--[[ `object` was an undeclared global here (nil); the local built above is `obj`.
@@ -10664,6 +10700,7 @@ components = {
 			})
 		
 			props.Function(self.Enabled)
+			vape:RequestSave()
 		end
 		
 		toggle.MouseEnter:Connect(function()
@@ -10856,6 +10893,7 @@ components = {
 			-- here. No shipped call site passes one today, which is why nothing broke; this
 			-- makes the contract real rather than waiting for the first one that does.
 			props.Function(self.ValueMin, self.ValueMax, isMax)
+			vape:RequestSave()
 		end
 		
 		knob.MouseEnter:Connect(function()

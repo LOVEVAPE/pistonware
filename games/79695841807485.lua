@@ -284,7 +284,14 @@ run(function()
 					return false
 				end
 			end
-			return (not vape.gui.ScaledGui.ClickGui.Visible) and (not inputService:GetFocusedTextBox())
+			-- vape.ClickGuiOpen: a plain field newgui keeps current. Reading the menu Instance
+			-- from this loop throws on ThreadFix executors (it sits under gethui/CoreGui).
+			local open = vape.ClickGuiOpen
+			if open == nil then
+				local ok, visible = pcall(function() return vape.gui.ScaledGui.ClickGui.Visible end)
+				open = ok and visible == true
+			end
+			return (not open) and (not inputService:GetFocusedTextBox())
 		end
 	
 		local function hook(...)

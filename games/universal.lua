@@ -215,6 +215,22 @@ local function isTarget(plr)
 	return targetNames[plr.Name] and true
 end
 
+--[[ Is Pistonware's own menu open. newgui publishes it as vape.ClickGuiOpen, a plain
+field: on ThreadFix executors the menu sits under gethui/CoreGui, and reading the
+Instance from a module loop (a thread a profile apply or a GUI click started, without
+the raised identity) throws and takes the loop down with it. The Instance read is only
+the fallback for a cached GUI that predates the field, and a failed read counts as
+closed. ]]
+local function clickGuiOpen()
+	local open = vape.ClickGuiOpen
+	if open ~= nil then return open == true end
+	if vape.ThreadFix then pcall(setthreadidentity, 8) end
+	local ok, visible = pcall(function()
+		return vape.gui.ScaledGui.ClickGui.Visible
+	end)
+	return ok and visible == true
+end
+
 local function canClick()
 	local mousepos = (inputService:GetMouseLocation() - guiService:GetGuiInset())
 	for _, v in lplr.PlayerGui:GetGuiObjectsAtPosition(mousepos.X, mousepos.Y) do
@@ -229,7 +245,7 @@ local function canClick()
 			return false
 		end
 	end
-	return (not vape.gui.ScaledGui.ClickGui.Visible) and (not inputService:GetFocusedTextBox())
+	return (not clickGuiOpen()) and (not inputService:GetFocusedTextBox())
 end
 
 local function getTableSize(tab)
@@ -1024,7 +1040,7 @@ run(function()
 						CircleObject.Position = inputService:GetMouseLocation()
 					end
 	
-					if rightClicked and not vape.gui.ScaledGui.ClickGui.Visible then
+					if rightClicked and not clickGuiOpen() then
 						ent = entitylib.EntityMouse({
 							Range = FOV.Value,
 							Part = Part.Value,
@@ -1183,7 +1199,7 @@ run(function()
 						end
 					else
 						if mouse1click and (isrbxactive or iswindowactive)() then
-							if not vape.gui.ScaledGui.ClickGui.Visible then
+							if not clickGuiOpen() then
 								(Mode.Value == 'Click' and mouse1click or mouse2click)()
 							end
 						end
