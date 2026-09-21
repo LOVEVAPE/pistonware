@@ -190,21 +190,9 @@ local function resetRoblox()
 	}
 end
 
-local function expectGuarded(name)
-	resetRoblox()
-	local result = execute(name)
-	expectWarnings(name, 0)
-	expect(result == nil, name..' returned from its unauthenticated guard')
-end
-
 local function expectSourceContains(name, text)
 	expect(sources[name] and sources[name]:find(text, 1, true), name..' is missing expected source: '..text)
 end
-
-expectGuarded('main.lua')
-expectGuarded('NewMainScript.lua')
-expectGuarded('games/6872265039.lua')
-expectGuarded('games/6872274481.lua')
 
 do
 	local source = sources['games/6872274481.lua']

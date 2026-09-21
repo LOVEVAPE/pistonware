@@ -33,17 +33,10 @@ local function bufferError(event, message, details)
 	return bufferCall('error', event, message, details)
 end
 
---[[ The loader is the only supported entry point: it runs the LuaArmor key gate and publishes
-script_key (which the protected bedwars.lua reads) before any of this downloads or executes.
-The GUI's reinject buttons go back through the loader, and a queued teleport does the same on
-the next server; the developer queued path restores loaderdev.lua first. All paths re-establish
-that state before main.lua is reached, so reaching here without it means the gate was skipped.
-Checked before the uninject below, so a failed check cannot tear down a working instance on its
-way out. ]]
-if not shared.PistonwareAuthenticated then
-	bufferWarn('runtime.unauthenticated', 'not authenticated -- run the pistonware loader and enter your key')
-	return
-end
+--[[ The loader is the only supported entry point. The GUI's reinject buttons go back through
+the loader, and a queued teleport does the same on the next server; the developer queued path
+restores loaderdev.lua first. There is no authentication state to re-establish -- the key system
+was removed -- so reaching here simply means the loader booted. ]]
 
 local release = type(shared.PistonwareRelease) == 'table' and shared.PistonwareRelease or {
 	channel = 'main',
@@ -413,16 +406,6 @@ local function finishLoading()
 		the ones that arrived after the load, so it cannot revert anything changed by hand.
 	]]
 	local function applyProfile(moduleSetComplete)
-		--[[ A LuaArmor session that was refused registers no game modules (see the session
-		block at the top of bedwars.lua). Loading a profile against that empty set would
-		bring everything up on defaults, and the Save below would write those defaults
-		back -- deleting the user's real config. Withholding the modules is the intended
-		consequence of a refusal; deleting configs is not, so do neither here. ]]
-		if shared.PistonwareSessionRejected then
-			failBoot('bedwars.session', 'session was not authorised')
-			bufferWarn('profile.session', 'session was not authorised -- leaving profiles untouched')
-			return
-		end
 		if shared.PistonwareBootFailed then return end
 		if not moduleSetComplete then
 			failBoot('modules.timeout', 'the game payload did not signal completion within 120 seconds')
@@ -464,9 +447,9 @@ local function finishLoading()
 
 	There are exactly two ways that finish is observable, and no third:
 	  * an ordinary game script RETURNS, which sets gameScriptFinished
-	  * BedWars pulls in a LuaArmor-protected payload which never returns (the VM keeps the
-	    thread it was invoked on), so bedwars.lua sets shared.PistonwareBedwarsLoaded as its
-	    final statement
+	  * BedWars pulls in a protected payload which never returns (the interpreter keeps the
+    thread it was invoked on), so bedwars.lua sets shared.PistonwareBedwarsLoaded as its
+    final statement
 
 	An earlier version tried to infer completion by watching the module count go quiet. It
 	does not work, and cannot be made to: the first seconds of downloadBedwars() are pure
@@ -474,8 +457,8 @@ local function finishLoading()
 	"finished". It declared victory at 4s -- before the payload had started -- and every
 	module that appeared afterwards was left on defaults. Guessing is worse than waiting.
 
-	The timeout is a backstop, not a mechanism. It only matters when the payload on LuaArmor
-	predates the completion flag; re-upload bedwars.lua and this returns the moment it lands.
+	The timeout is a backstop, not a mechanism. It only matters when the payload predates the
+	completion flag and cannot signal it; a newer upload returns the moment it lands.
 	Returns whether the module list is actually COMPLETE, which is not the same as whether
 	the wait finished. Hitting the backstop means the payload is still registering, and the
 	caller has to know that before it writes anything to disk. ]]
@@ -493,7 +476,7 @@ local function finishLoading()
 		local count = vape.ModuleCount or 0
 		local how = shared.PistonwareBedwarsLoaded and 'payload signalled'
 			or gameScriptFinished and 'game script returned'
-			or 'TIMED OUT after 120s -- re-upload bedwars.lua to LuaArmor so it can signal when it is done'
+			or 'TIMED OUT after 120s -- the BedWars payload never signalled completion'
 		debugWarn(('[pistonware] %d modules in %.1fs (%s) -- applying profile'):format(count, os.clock() - started, how))
 		return complete
 	end
@@ -514,10 +497,9 @@ local function finishLoading()
 		if teleportState == Enum.TeleportState.Failed then return end
 		if (not teleportedServers) and (not shared.VapeIndependent) then
 			teleportedServers = true
-			--[[ Re-enter the appropriate loader on the new server so authentication is derived
-			again. The developer path restores loaderdev.lua first so its local hookfunction seam
-			is available; the public path loads the published loader and performs the official
-			Luarmor check again. ]]
+			--[[ Re-enter the appropriate loader on the new server. There is no authentication to
+			re-derive -- the key system was removed -- but the developer path still restores
+			loaderdev.lua first so its local hookfunction seam is available. ]]
 						local teleportScript = [[
 							shared.vapereload = true
 							local function queuedError(event, message)
@@ -533,9 +515,8 @@ local function finishLoading()
 								end
 							end
 						-- A developer teleport must restore the developer loader first. loaderdev.lua
-						-- installs the local LuaArmor test seam; jumping straight into main.lua loses
-						-- that seam in the new Roblox execution context and the local payload reports
-						-- an authorization failure even though the original boot was valid.
+						-- installs the local test seams; jumping straight into main.lua loses them in
+						-- the new Roblox execution context.
 						if rawget(shared, 'PistonwareDeveloper') == true then
 							-- Each step leaves a line in pistonware_teleport.log: nothing else is
 							-- up yet on the new server to report where a queued boot stopped.
@@ -550,7 +531,6 @@ local function finishLoading()
 								end)
 							end
 							crumb('queued script started in place '..tostring(game.PlaceId))
-							pcall(rawset, shared, 'PistonwareSessionRejected', nil)
 							pcall(rawset, shared, 'PistonwareLoaderBoot', nil)
 							local developerSource
 							pcall(function()
@@ -609,15 +589,6 @@ local function finishLoading()
 					..', sourceRef='..string.format('%q', sourceRef)
 					..', version='..string.format('%q', version)
 					..', cacheReady=true, resolved=true}\n'..teleportScript
-			end
-			--[[ Globals and shared do not survive a teleport. Carry only the key candidate; the
-			appropriate loader above must validate it again before main.lua can run. Do not carry
-			PistonwareAuthenticated: that boolean is the one-line gate bypass this path used to
-			publish. %q keeps keys containing a quote or backslash valid Lua. ]]
-			local teleportKey = rawget(shared, 'PistonwareKey')
-			if type(teleportKey) == 'string' and teleportKey ~= '' then
-				local quoted = string.format('%q', teleportKey)
-				teleportScript = 'script_key = '..quoted..'\nrawset(shared, "PistonwareKey", '..quoted..')\n'..teleportScript
 			end
 			if rawget(shared, 'PistonwareDeveloper') == true then
 				teleportScript = 'rawset(shared, "PistonwareDeveloper", true)\n'..teleportScript
@@ -1175,10 +1146,10 @@ if not shared.VapeIndependent then
 	file except BedWars -- has already set gameScriptFinished before we get past this line,
 	and finishLoading takes the single-pass path exactly as it always did.
 
-	BedWars is the exception. bedwars.lua is 425KB interpreted by a LuaArmor VM and takes
-	~30s, and none of its modules can exist until it finishes -- that part is not fixable from
-	here. What it must not do is hold up the GUI, the universal modules and your config, none
-	of which have anything to do with it.
+	BedWars is the exception. bedwars.lua is a large protected payload that takes ~30s to
+	interpret, and none of its modules can exist until it finishes -- that part is not fixable
+	from here. What it must not do is hold up the GUI, the universal modules and your config,
+	none of which have anything to do with it.
 
 	Varargs are packed because '...' is only valid directly in this chunk, never inside the
 	nested function the spawn needs. ]]
@@ -1200,28 +1171,6 @@ if not shared.VapeIndependent then
 		from the previous injection would tell waitForModules the payload had already finished
 		before it had even started re-registering. ]]
 		shared.PistonwareBedwarsLoaded = nil
-		--[[ Same reasoning for the refusal flag: bedwars.lua sets it from a fresh verdict every
-		run, but a game script that never sets it at all (the lobby) would otherwise inherit
-		a true left behind by a revoked BedWars session and refuse to save profiles there. ]]
-		shared.PistonwareSessionRejected = nil
-
-		--[[ Re-publish the key immediately before the game script runs. LuaArmor blanks the global
-		script_key once it has authenticated, so it is single-use per session and any later
-		load finds nothing -- which is not a soft failure, it kicks the player.
-
-		games/6872274481.lua does this too, closer to the payload, but that file is CACHED:
-		anyone still holding a copy from before it gained that call would never get it. This
-		file is the one that is reliably current, so the safety net belongs here as well.
-
-		Written to all three tables because executors disagree on what a loadstring'd chunk's
-		environment is -- on several mobile executors a bare global, getgenv() and _G are
-		genuinely different tables, and the payload only reads one of them. ]]
-		if type(shared.PistonwareKey) == 'string' and shared.PistonwareKey ~= '' then
-			local key = shared.PistonwareKey
-			script_key = key
-			pcall(function() getgenv().script_key = key end)
-			pcall(function() _G.script_key = key end)
-		end
 
 		local started = os.clock()
 		task.spawn(function()

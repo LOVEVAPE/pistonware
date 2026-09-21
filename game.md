@@ -18,7 +18,7 @@ As of 2026-08-24:
 - `tests/check_luau.py` parses all Lua sources and runs a Roblox-shaped smoke test. It does not
   qualify live Roblox behavior or server validation.
 - Recent maintenance has focused on guarded loading, module failure isolation, block traversal,
-  movement helpers, request pacing, key publication, and Luau validation. See `merge.md` for the
+  movement helpers, request pacing, and Luau validation. See `merge.md` for the
   broader change log.
 
 When a task says “BedWars code,” start with the checked-in adapter and the relevant wrapper. Do not
@@ -63,15 +63,14 @@ those adapters just because it contains a similarly named module.
 
 `games/6872274481.lua` has these important phases:
 
-1. It refuses to run unless `shared.PistonwareAuthenticated` is true.
-2. It establishes services, libraries, local-player state, inventory state, entity tracking, and
+1. It establishes services, libraries, local-player state, inventory state, entity tracking, and
    the `bedwars` controller table.
-3. It discovers the game remotes from the live controller functions. Remote names are not a
+2. It discovers the game remotes from the live controller functions. Remote names are not a
    stable hand-written API in this repository; changes to the game can move the constants used
    by the discovery code.
-4. It registers each feature through the local `run(function() ... end)` wrapper. A failed module
+3. It registers each feature through the local `run(function() ... end)` wrapper. A failed module
    should report its own error and not prevent later modules from registering.
-5. It publishes a shared integration surface at `shared.bedwars`.
+4. It publishes a shared integration surface at `shared.bedwars`.
 
 ### Shared integration surface
 
@@ -110,7 +109,7 @@ understand in five layers:
 3. Legit/UI modules (`7336..8610`): local presentation, sound, viewmodel, interface, and
    end-of-round effects.
 4. Device and nametag utilities (`8613..8733`): local input/device spoofing and nametag hiding.
-5. Shared publication (`8735..8954`): the exported integration surface and key publication.
+5. Shared publication (`8735..8954`): the exported integration surface.
 
 The important named functions are the contracts agents should look for before adding another
 helper:
@@ -128,7 +127,7 @@ helper:
 | Staff response | `getRole`, `staffFunction`, `checkFriends`, `matchRunningFor`, `isSpectating`, `checkJoin`, `playerAdded` | Detect configured staff/operator conditions and apply the selected local response. |
 | World automation | `fixPosition`, `switchHotbarItem`, `getBedNear`, `getBlocks`, `getPyramid`, `lootChest`, `getPlacedBlocksInPoints` | Support AutoSuffocate, AutoTool, BedProtector, ChestSteal, Schematica, and related modules. |
 | Shop/inventory | `getShopNPC`, `canBuy`, `buyItem`, `buyUpgrade`, `buyTool`, `consumeCheck` | Resolve shop purchases and local consumption checks. |
-| UI and integration boundary | `CreateWindow`, `HotbarList`, `removeGameNametags`, `restoreGameNametags`, `modifyconstant`, `choosesong`, `updateVolumes`, `sendInputType`, `resolveInputType`, `downloadBedwars`, `republishKey` | Build local UI, patch reversible presentation hooks, resolve device state, and publish integration state. |
+| UI and integration boundary | `CreateWindow`, `HotbarList`, `removeGameNametags`, `restoreGameNametags`, `modifyconstant`, `choosesong`, `updateVolumes`, `sendInputType`, `resolveInputType`, `downloadBedwars` | Build local UI, patch reversible presentation hooks, resolve device state, and publish integration state. |
 
 The most important control-flow fact is the `run` function at the top of the adapter: each module
 registration is protected by `pcall`, so a failure should be isolated to that module. The

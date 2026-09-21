@@ -1804,38 +1804,7 @@ function vape:LoadGUI()
 	scarcitybanner.TextScaled = true
 	scarcitybanner.TextStrokeTransparency = 0.5
 	scarcitybanner.Parent = clickgui
-	-- Time left on the key, from the expiry the loader stored. Developer runs count as lifetime;
-	-- keeps the discord line when an older loader stored nothing.
-	local function keyDuration()
-		local expire = tonumber(shared.PistonwareKeyExpire)
-		if not expire and shared.PistonwareDeveloper then expire = -1 end
-		if not expire then return nil end
-		local prefix = 'Thank you for choosing Pistonware. Remaining Key Duration: '
-		if expire < 0 then return 'Thank you for choosing Pistonware.' end
-		local left = math.max(expire - os.time(), 0)
-		if left == 0 then return 'Thank you for choosing Pistonware. Your key has expired.' end
-		local function unit(n, word)
-			return n..' '..word..(n == 1 and '' or 's')
-		end
-		local days, hours, minutes = left // 86400, left % 86400 // 3600, left % 3600 // 60
-		local parts = {}
-		if days > 0 then table.insert(parts, unit(days, 'day')) end
-		if hours > 0 then table.insert(parts, unit(hours, 'hour')) end
-		if days == 0 and (minutes > 0 or hours == 0) then table.insert(parts, unit(math.max(minutes, 1), 'minute')) end
-		return prefix..table.concat(parts, ', ')
-	end
-	local function refreshDuration()
-		local text = keyDuration()
-		if text then scarcitybanner.Text = text end
-	end
-	refreshDuration()
-	clickgui:GetPropertyChangedSignal('Visible'):Connect(refreshDuration)
-	task.spawn(function()
-		while scarcitybanner.Parent do
-			task.wait(30)
-			if clickgui.Visible then refreshDuration() end
-		end
-	end)
+	-- The banner is static: the key system was removed, so there is no expiry to count down.
 	local modal = Instance.new('TextButton')
 	modal.BackgroundTransparency = 1
 	modal.Modal = true
@@ -2009,7 +1978,7 @@ function vape:LoadGUI()
 
 	-- Same reinject route the buttons in Settings > General use: the developer build lives on
 	-- disk under its own name and must never be fetched from GitHub, and every other path goes
-	-- back through the loader so the key gate re-runs.
+	-- back through the loader for a clean reload.
 	local function reinjectThroughLoader()
 		if shared.PistonwareDeveloper and isfile('pistonware/loaderdev.lua') then
 			loadstring(readfile('pistonware/loaderdev.lua'), 'loader')()
@@ -3423,10 +3392,8 @@ function vape:LoadGUI()
 			end
 	
 			shared.vapereload = true
-			--[[ Back through the pistonware loader, which re-runs the key gate. That is deliberate:
-			shared.PistonwareAuthenticated is cleared and re-derived on every run, so a reinject
-			revalidates rather than inheriting a flag. The developer loader lives on disk under a
-			different name and must never be fetched from GitHub -- it uses the same key gate. ]]
+			--[[ Back through the pistonware loader for a clean reload. The developer loader lives
+			on disk under a different name and must never be fetched from GitHub. ]]
 			if shared.PistonwareDeveloper and isfile('pistonware/loaderdev.lua') then
 				runChunk(readfile('pistonware/loaderdev.lua'), 'loader')
 			else
@@ -3448,10 +3415,8 @@ function vape:LoadGUI()
 		Name = 'Reinject',
 		Function = function()
 			shared.vapereload = true
-			--[[ Back through the pistonware loader, which re-runs the key gate. That is deliberate:
-			shared.PistonwareAuthenticated is cleared and re-derived on every run, so a reinject
-			revalidates rather than inheriting a flag. The developer loader lives on disk under a
-			different name and must never be fetched from GitHub -- it uses the same key gate. ]]
+			--[[ Back through the pistonware loader for a clean reload. The developer loader lives
+			on disk under a different name and must never be fetched from GitHub. ]]
 			if shared.PistonwareDeveloper and isfile('pistonware/loaderdev.lua') then
 				runChunk(readfile('pistonware/loaderdev.lua'), 'loader')
 			else

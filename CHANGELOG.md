@@ -20,7 +20,7 @@ Added FFlags profile management with add, import, export, paste, and reset actio
 Added profile import and export actions with profile name validation.
 Added profile synchronization and profile migration support in the GUI.
 Added runtime diagnostics and safer module execution error handling.
-Added safer queued teleport reinjection with channel, key, profile, and developer state handoff.
+Added safer queued teleport reinjection with channel, profile, and developer state handoff.
 Added compatibility fallbacks for session information and pathfinding services.
 Added remote observation support for public game integrations.
 

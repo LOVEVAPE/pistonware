@@ -10,11 +10,6 @@ local function bufferCall(method, event, message, details)
 	if shared.PistonwareDeveloper == true then warn('[pistonware] '..tostring(message)) end
 end
 
-if not shared.PistonwareAuthenticated then
-	bufferCall('warn', 'lobby.unauthenticated', 'not authenticated -- run the pistonware loader and enter your key')
-	return
-end
-
 local function errorTrace(err)
 	local traceback
 	pcall(function()
