@@ -61,7 +61,7 @@ local function downloadFile(path, func)
 				if isBedwars then
 					return pistonwareProtectedHttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true, attempt)
 				end
-				return pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true, attempt)
+				return pistonwareHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/main/'..relPath, true, attempt)
 			end)
 			if suc and res and res ~= '' and res ~= '404: Not Found' then
 				content = res
@@ -92,7 +92,7 @@ end
 pcall(function()
 	if #listfiles('pistonware/profiles') < 3 then
 		local reqSuc, res = pcall(function()
-			return pistonwareHttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
+			return pistonwareHttpGet('https://api.github.com/repos/LOVEVAPE/pistonware/contents/profiles', true)
 		end)
 		if reqSuc and res and res ~= '404: Not Found' then
 			local bodySuc, body = pcall(function()

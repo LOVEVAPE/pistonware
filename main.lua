@@ -82,14 +82,14 @@ local function rewriteReleaseUrl(url)
 		local ok, rewritten = pcall(adapter, value)
 		if ok and type(rewritten) == 'string' then return rewritten end
 	end
-	value = value:gsub('https://raw%.githubusercontent%.com/themagicpiston/pistonware/refs/heads/main/', function()
-		return 'https://raw.githubusercontent.com/themagicpiston/pistonware/'..ref..'/'
+	value = value:gsub('https://raw%.githubusercontent%.com/LOVEVAPE/pistonware/refs/heads/main/', function()
+		return 'https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..ref..'/'
 	end)
-	value = value:gsub('https://raw%.githubusercontent%.com/themagicpiston/pistonware/main/', function()
-		return 'https://raw.githubusercontent.com/themagicpiston/pistonware/'..ref..'/'
+	value = value:gsub('https://raw%.githubusercontent%.com/LOVEVAPE/pistonware/main/', function()
+		return 'https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..ref..'/'
 	end)
-	value = value:gsub('https://raw%.githubusercontent%.com/themagicpiston/pistonware/main/', function()
-		return 'https://raw.githubusercontent.com/themagicpiston/pistonware/'..ref..'/'
+	value = value:gsub('https://raw%.githubusercontent%.com/LOVEVAPE/pistonware/main/', function()
+		return 'https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..ref..'/'
 	end)
 	value = value:gsub('https://gitlab%.com/pistonware/pistonware/%-/raw/main/', function()
 		return 'https://gitlab.com/pistonware/pistonware/-/raw/'..(release.branch or 'main')..'/'
@@ -103,7 +103,7 @@ shared.PistonwareRewriteUrl = rewriteReleaseUrl
 
 local function projectRawUrl(path, ref)
 	path = tostring(path or ''):gsub('^/', '')
-	return 'https://raw.githubusercontent.com/themagicpiston/pistonware/'..(ref or releaseRef())..'/'..path
+	return 'https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..(ref or releaseRef())..'/'..path
 end
 
 local function protectedRawUrl(ref)
@@ -564,7 +564,7 @@ local function finishLoading()
 						local release = shared.PistonwareRelease
 							local ref = type(release) == 'table' and (release.sourceRef or release.branch) or 'main'
 							local ok, source = pcall(function()
-								return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..ref..'/loader.lua', true)
+								return game:HttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..ref..'/loader.lua', true)
 							end)
 							if not ok or type(source) ~= 'string' or source == '' or source == '404: Not Found' then
 								queuedError('teleport.loader.download', source)

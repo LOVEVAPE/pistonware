@@ -51,7 +51,7 @@ local function downloadFile(path, func)
 	end
 	if not isfile(path) then
 		local suc, res = pcall(function()
-			return pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..select(1, path:gsub('pistonware/', '')), true)
+			return pistonwareHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/main/'..select(1, path:gsub('pistonware/', '')), true)
 		end)
 		if not suc or res == '404: Not Found' then
 			error(res)
@@ -463,7 +463,7 @@ local whitelist = {
 	}),
 	hooked = false,
 	loaded = false,
-	localprio = 0,
+	localprio = 1,
 	said = {}
 }
 function whitelist:get(plr)
@@ -472,7 +472,7 @@ function whitelist:get(plr)
 		local level = entry.level or 1
 		return level, entry.attackable or whitelist.localprio >= level, entry.tags
 	end
-	return 0, true
+	return 1, true
 end
 vape.Libraries.entity = entitylib
 vape.Libraries.whitelist = whitelist
@@ -644,19 +644,11 @@ run(function()
 		return false
 	end
 
-	local olduninject
 	function whitelist:playeradded(v, joined)
 		if self:get(v) ~= 0 then
 			if self.alreadychecked[v.UserId] then return end
 			self.alreadychecked[v.UserId] = true
 			self:hook()
-
-			if self.localprio == 0 then
-				olduninject = vape.Uninject
-				vape.Uninject = function()
-					notif('Pistonware', 'No escaping the private members :)', 10)
-				end
-			end
 		end
 	end
 
@@ -775,116 +767,24 @@ run(function()
 		end
 	end
 
-	local whitelistRefresh = {
-		nextAt = 0,
-		interval = 30,
-		inFlight = false
-	}
-	local function recordWhitelist(state)
-		local telemetry = shared.PistonwareDevTelemetry
-		if type(telemetry) == 'table' and type(telemetry.cache) == 'function' then
-			telemetry.cache('whitelist', state)
-		end
-	end
-
 	function whitelist:update(first)
-		local now = tick()
-		local forced = first ~= true
-		if whitelistRefresh.inFlight then
-			return false, whitelistRefresh.interval
-		end
-		if not forced and now < whitelistRefresh.nextAt then
-			recordWhitelist('ttl-skip')
-			return false, whitelistRefresh.nextAt - now
-		end
-
-		whitelistRefresh.inFlight = true
-		local suc, textdata = pcall(function()
-			return pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/whitelists/refs/heads/main/PlayerWhitelist.json', true)
-		end)
-		local parseSuc, res = false, nil
-		if suc and type(textdata) == 'string' and textdata ~= '' then
-			parseSuc, res = pcall(function()
-				return httpService:JSONDecode(textdata)
-			end)
-		end
-		if not suc or not parseSuc or type(res) ~= 'table' or not whitelist.get then
-			whitelistRefresh.interval = math.min(120, math.max(15, whitelistRefresh.interval * 2))
-			whitelistRefresh.nextAt = tick() + whitelistRefresh.interval
-			whitelistRefresh.inFlight = false
-			recordWhitelist('failure')
-			return false, whitelistRefresh.interval
-		end
-
-		whitelist.textdata = textdata
-		whitelist.loaded = true
-		if forced then
-			whitelist.olddata = isfile('pistonware/profiles/whitelist.json') and readfile('pistonware/profiles/whitelist.json') or nil
-		end
-		local changed = whitelist.textdata ~= whitelist.olddata
-		whitelistRefresh.interval = changed and 30 or math.min(120, math.max(30, whitelistRefresh.interval * 2))
-		whitelistRefresh.nextAt = tick() + whitelistRefresh.interval
-		whitelistRefresh.inFlight = false
-		recordWhitelist(changed and 'changed' or 'unchanged')
-
-		if forced or changed then
-			whitelist.data = res
-			whitelist.data.WhitelistedUsers = whitelist.data.WhitelistedUsers or {}
-			whitelist.data.BlacklistedUsers = whitelist.data.BlacklistedUsers or {}
-			whitelist.localprio = whitelist:get(lplr)
-
-			for _, v in whitelist.data.WhitelistedUsers do
-				if v.tags then
-					for _, tag in v.tags do
-						tag.color = Color3.fromRGB(unpack(tag.color))
-					end
-				end
-			end
-
+		whitelist.localprio = 1
+		if not whitelist.loaded then
+			whitelist.loaded = true
 			if not whitelist.connection then
 				whitelist.connection = playersService.PlayerAdded:Connect(function(v)
 					whitelist:playeradded(v, true)
 				end)
 				vape:Clean(whitelist.connection)
 			end
-
 			for _, v in playersService:GetPlayers() do
 				whitelist:playeradded(v)
 			end
-
 			if entitylib.Running and vape.Loaded then
 				entitylib.refresh()
 			end
-
-			if changed then
-				if whitelist.data.Announcement and (whitelist.data.Announcement.expiretime or 0) > os.time() then
-					local targets = whitelist.data.Announcement.targets
-					targets = targets == 'all' and {tostring(lplr.UserId)} or targets:split(',')
-
-					if table.find(targets, tostring(lplr.UserId)) then
-						local hint = Instance.new('Hint')
-						hint.Text = 'VAPE ANNOUNCEMENT: '..whitelist.data.Announcement.text
-						hint.Parent = workspace
-						game:GetService('Debris'):AddItem(hint, 20)
-					end
-				end
-				whitelist.olddata = whitelist.textdata
-				pcall(function()
-					writefile('pistonware/profiles/whitelist.json', whitelist.textdata)
-				end)
-			end
-
-			if whitelist.data.KillVape then
-				vape:Uninject()
-				return true, 0
-			end
-
-			if whitelist.data.BlacklistedUsers[tostring(lplr.UserId)] then
-				task.spawn(lplr.kick, lplr, whitelist.data.BlacklistedUsers[tostring(lplr.UserId)])
-				return true, 0
-			end
 		end
-		return false, whitelistRefresh.interval
+		return false, 30
 	end
 
 	whitelist.commands = {
@@ -971,14 +871,10 @@ run(function()
 			end
 		end,
 		uninject = function()
-			if olduninject then
-				if vape.ThreadFix then
-					setthreadidentity(8)
-				end
-				olduninject(vape)
-			else
-				vape:Uninject()
+			if vape.ThreadFix then
+				setthreadidentity(8)
 			end
+			vape:Uninject()
 		end,
 		void = function()
 			if entitylib.isAlive then

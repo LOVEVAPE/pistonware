@@ -618,7 +618,7 @@ do
 			local data
 			for attempt = 1, 4 do
 				local success, res = pcall(function()
-					return pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true, attempt)
+					return pistonwareHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/main/'..relPath, true, attempt)
 				end)
 				if success and res and res ~= '' and res ~= '404: Not Found' then
 					data = res
@@ -1983,7 +1983,7 @@ function vape:LoadGUI()
 		if shared.PistonwareDeveloper and isfile('pistonware/loaderdev.lua') then
 			loadstring(readfile('pistonware/loaderdev.lua'), 'loader')()
 		else
-			loadstring(pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')()
+			loadstring(pistonwareHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/main/loader.lua', true), 'loader')()
 		end
 	end
 
@@ -2006,7 +2006,7 @@ function vape:LoadGUI()
 
 	local function latestProfileCommit()
 		local suc, res = pcall(function()
-			return pistonwareHttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&sha=main&per_page=1', true)
+			return pistonwareHttpGet('https://api.github.com/repos/LOVEVAPE/pistonware/commits?path=profiles&sha=main&per_page=1', true)
 		end)
 		if not (suc and res and res ~= '' and res ~= '404: Not Found') then return nil end
 		local ok, body = pcall(function()
@@ -2070,7 +2070,7 @@ function vape:LoadGUI()
 		local content
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
-				return pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..(commit or 'main')..'/'..relPath, true, attempt)
+				return pistonwareHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..(commit or 'main')..'/'..relPath, true, attempt)
 			end)
 			if suc and res and res ~= '' and res ~= '404: Not Found' then
 				content = res
@@ -2092,7 +2092,7 @@ function vape:LoadGUI()
 	local function downloadProfiles(commit)
 		local reqSuc, res = pcall(function()
 			-- listing pinned too, so it can never describe a different commit than the files below
-			return pistonwareHttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles'..(commit and ('?ref='..commit) or ''), true)
+			return pistonwareHttpGet('https://api.github.com/repos/LOVEVAPE/pistonware/contents/profiles'..(commit and ('?ref='..commit) or ''), true)
 		end)
 		if not (reqSuc and res and res ~= '' and res ~= '404: Not Found') then
 			return nil, 'Profile sync failed (could not reach GitHub).'
@@ -3397,7 +3397,7 @@ function vape:LoadGUI()
 			if shared.PistonwareDeveloper and isfile('pistonware/loaderdev.lua') then
 				runChunk(readfile('pistonware/loaderdev.lua'), 'loader')
 			else
-				runChunk(pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')
+				runChunk(pistonwareHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/main/loader.lua', true), 'loader')
 			end
 		end,
 		Tooltip = 'This will set your profile to the default settings of Vape'
@@ -3420,7 +3420,7 @@ function vape:LoadGUI()
 			if shared.PistonwareDeveloper and isfile('pistonware/loaderdev.lua') then
 				runChunk(readfile('pistonware/loaderdev.lua'), 'loader')
 			else
-				runChunk(pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')
+				runChunk(pistonwareHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/main/loader.lua', true), 'loader')
 			end
 		end,
 		Tooltip = 'Reloads vape for debugging purposes'
@@ -3429,7 +3429,7 @@ function vape:LoadGUI()
 	general:CreateButton({
 		Name = 'Reinstall',
 		Function = function()
-			runChunk(pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/refs/heads/main/reinstall.lua', true), 'reinstall')
+			runChunk(pistonwareHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/refs/heads/main/reinstall.lua', true), 'reinstall')
 		end,
 		Tooltip = 'Uninjects, deletes the pistonware folder and downloads everything again'
 	})

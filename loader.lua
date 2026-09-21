@@ -611,7 +611,7 @@ end
 
 local function projectRawUrl(path, ref)
 	path = tostring(path or ''):gsub('^/', '')
-	return 'https://raw.githubusercontent.com/themagicpiston/pistonware/'..sourceRef(ref)..'/'..path
+	return 'https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..sourceRef(ref)..'/'..path
 end
 
 local function protectedRawUrl(ref)
@@ -621,9 +621,9 @@ end
 local function rewriteProjectUrl(url)
 	local value = tostring(url or '')
 	local ref = sourceRef()
-	value = value:gsub('https://raw%.githubusercontent%.com/themagicpiston/pistonware/refs/heads/main/', function() return projectRawUrl('', ref) end)
-	value = value:gsub('https://raw%.githubusercontent%.com/themagicpiston/pistonware/main/', function() return projectRawUrl('', ref) end)
-	value = value:gsub('https://raw%.githubusercontent%.com/themagicpiston/pistonware/main/', function() return projectRawUrl('', ref) end)
+	value = value:gsub('https://raw%.githubusercontent%.com/LOVEVAPE/pistonware/refs/heads/main/', function() return projectRawUrl('', ref) end)
+	value = value:gsub('https://raw%.githubusercontent%.com/LOVEVAPE/pistonware/main/', function() return projectRawUrl('', ref) end)
+	value = value:gsub('https://raw%.githubusercontent%.com/LOVEVAPE/pistonware/main/', function() return projectRawUrl('', ref) end)
 	value = value:gsub('https://gitlab%.com/pistonware/pistonware/%-/raw/main/', function() return protectedRawUrl(release.branch):gsub('/bedwars%.lua$', '/') end)
 	value = value:gsub('(/git/trees/)main', '%1'..release.branch)
 	value = value:gsub('([?&]sha=)main', '%1'..ref)
@@ -825,7 +825,7 @@ local function fetchRepoTree()
 	end
 	repoTreeTried = true
 	local ok, err = pcall(function()
-		local body, treeErr = githubJson('https://api.github.com/repos/themagicpiston/pistonware/git/trees/'..(release.sourceRef or release.branch)..'?recursive=1')
+		local body, treeErr = githubJson('https://api.github.com/repos/LOVEVAPE/pistonware/git/trees/'..(release.sourceRef or release.branch)..'?recursive=1')
 		if type(body) == 'table' and type(body.tree) == 'table' and type(body.sha) == 'string' then
 			repoTree = body
 			--[[ Handed to main.lua so its asset prefetch reads this instead of spending its own
@@ -863,7 +863,7 @@ ref advertisement -- what `git clone` reads first -- lists every branch as a pkt
 '<4 hex length><40 hex sha> refs/heads/<name>'. The first line also carries HEAD and the
 capability list after a NUL, which the ref match below never reaches for a branch. ]]
 local function commitFromGitRefs()
-	local body, err = githubGet('https://github.com/themagicpiston/pistonware.git/info/refs?service=git-upload-pack')
+	local body, err = githubGet('https://github.com/LOVEVAPE/pistonware.git/info/refs?service=git-upload-pack')
 	if not body then return nil, err end
 	local wanted = 'refs/heads/'..release.branch
 	for line in body:gmatch('[^\n]+') do
@@ -882,7 +882,7 @@ end
 
 -- Second non-API source: the branch's commit feed, newest commit first.
 local function commitFromFeed()
-	local body, err = githubGet('https://github.com/themagicpiston/pistonware/commits/'..release.branch..'.atom')
+	local body, err = githubGet('https://github.com/LOVEVAPE/pistonware/commits/'..release.branch..'.atom')
 	if not body then return nil, err end
 	local sha = body:match('Grit::Commit/(%x+)')
 	if validCommit(sha) then return sha end
@@ -902,7 +902,7 @@ local function fetchBranchCommit()
 	-- Why each source failed, in order, so a report names every one of them.
 	local reasons = {}
 	local ok, err = pcall(function()
-		local body, apiErr = githubJson('https://api.github.com/repos/themagicpiston/pistonware/branches/'..release.branch)
+		local body, apiErr = githubJson('https://api.github.com/repos/LOVEVAPE/pistonware/branches/'..release.branch)
 		local commit = type(body) == 'table' and type(body.commit) == 'table' and body.commit.sha
 		if validCommit(commit) then
 			branchCommit = commit
