@@ -92,7 +92,7 @@ local function rewriteReleaseUrl(url)
 		return 'https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..ref..'/'
 	end)
 	value = value:gsub('https://gitlab%.com/pistonware/pistonware/%-/raw/main/', function()
-		return 'https://gitlab.com/pistonware/pistonware/-/raw/'..(release.branch or 'main')..'/'
+		return 'https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..(release.branch or 'main')..'/'
 	end)
 	value = value:gsub('([?&]sha=)main', '%1'..ref)
 	value = value:gsub('([?&]ref=)main', '%1'..ref)
@@ -107,7 +107,7 @@ local function projectRawUrl(path, ref)
 end
 
 local function protectedRawUrl(ref)
-	return 'https://gitlab.com/pistonware/pistonware/-/raw/'..(ref or release.branch or 'main')..'/bedwars.lua'
+	return 'https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..(ref or release.branch or 'main')..'/bedwars.lua'
 end
 
 shared.PistonwareRawUrl = projectRawUrl

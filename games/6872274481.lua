@@ -11347,12 +11347,9 @@ shared.bedwars = {
 	fpsHooks            = fpsHooks,
 }
 
---[[ bedwars.lua is the ONLY file fetched from GitLab -- everything else comes from GitHub -- and
-it sits at the REPO ROOT there (gitlab.com/pistonware/pistonware/bedwars.lua).
-
-What lives at that URL is a ~220 byte REDIRECT to the hosting provider's loader endpoint, not
-the protected build; the provider hosts the build itself and serves the current one on every
-request, which is what keeps security updates and Heartbeat live.
+--[[ bedwars.lua is the ONLY file fetched separately -- everything else comes from the same
+repo -- and it sits at the REPO ROOT there (raw.githubusercontent.com/LOVEVAPE/pistonware/
+bedwars.lua).
 
 It is never written to disk and, outside developer mode, never read from disk. This is the
 one file the boot depends on, so it gets neither the caching nor the commit tracking that
@@ -11361,11 +11358,10 @@ executed in its place. See downloadBedwars for why the developer hatch is the on
 why it no longer costs anything. ]]
 
 --[[
-    Fetches the payload redirect from GitLab. Outside developer mode it is NEVER cached and
+    Fetches the payload from the repo root. Outside developer mode it is NEVER cached and
     NEVER read from disk.
 
-    This is the file protection depends on, and two conveniences that made sense everywhere else
-    turned out to be bypasses here:
+    Two conveniences that made sense everywhere else turned out to be bypasses here:
 
       * A cached copy whose recorded commit sha still matched was returned as-is. Editing the
         file did not change the sha, so a tampered cache survived every update check.
@@ -11375,10 +11371,8 @@ why it no longer costs anything. ]]
     The cache is gone for good. The developer hatch is back, because the second problem was
     never really about where the source came from -- it was about the source not being checked.
 
-    There is no offline fallback, on purpose: what lives on GitLab is a ~220 byte redirect to
-    the hosting provider, and running the payload needs that provider reachable anyway, so a
-    cached copy could not have helped a genuinely offline user -- only someone who wanted a
-    local file executed instead of the real one.
+    There is no offline fallback, on purpose: the payload is a repo file like any other, and a
+    cached copy would only ever be a way to get a local file executed instead of the current one.
 
     Cheap, too: one small request, and dropping the cache also dropped the commit-check round
     trip that used to precede it.
@@ -11447,7 +11441,7 @@ local function downloadBedwars()
         local suc, res = pcall(function()
             local protectedUrl = shared.PistonwareProtectedRawUrl
             return type(protectedUrl) == 'function' and game:HttpGet(protectedUrl(), true)
-                or game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
+                or game:HttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/main/bedwars.lua', true)
         end)
         --[[ compile check: during an outage HttpGet can hand back the 503/error page as the body,
         which the ~=''/'404' tests would accept ]]

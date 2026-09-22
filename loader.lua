@@ -615,7 +615,7 @@ local function projectRawUrl(path, ref)
 end
 
 local function protectedRawUrl(ref)
-	return 'https://gitlab.com/pistonware/pistonware/-/raw/'..(ref or release.branch)..'/bedwars.lua'
+	return 'https://raw.githubusercontent.com/LOVEVAPE/pistonware/'..(ref or release.branch)..'/bedwars.lua'
 end
 
 local function rewriteProjectUrl(url)

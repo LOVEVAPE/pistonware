@@ -59,7 +59,7 @@ local function downloadFile(path, func)
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
 				if isBedwars then
-					return pistonwareProtectedHttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true, attempt)
+					return pistonwareProtectedHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/main/bedwars.lua', true, attempt)
 				end
 				return pistonwareHttpGet('https://raw.githubusercontent.com/LOVEVAPE/pistonware/main/'..relPath, true, attempt)
 			end)
